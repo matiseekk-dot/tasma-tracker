@@ -1,0 +1,15 @@
+{
+  "name": "Taśma Tracker",
+  "short_name": "Taśma",
+  "start_url": "/tasma-tracker/",
+  "display": "standalone",
+  "background_color": "#080b0f",
+  "theme_color": "#f0a500",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23080b0f'/><text y='70' x='50' text-anchor='middle' font-size='60'>📈</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
