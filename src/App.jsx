@@ -208,6 +208,10 @@ export default function App() {
         @keyframes fd{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
         .fd{animation:fd 0.2s ease;}
         .tap:active{opacity:0.7;}
+        @keyframes pulse-border{0%,100%{box-shadow:0 0 0 0 rgba(240,165,0,0.4)}50%{box-shadow:0 0 0 4px rgba(240,165,0,0.15)}}
+        .pending-card{animation:pulse-border 2s ease-in-out infinite;}
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:0.4}}
+        .pending-dot{animation:blink 1.4s ease-in-out infinite;}
       `}</style>
 
       {/* HEADER */}
@@ -569,10 +573,17 @@ function Card({c,expanded,onToggle,onWon,onLost,onPending,onEdit,onDelete}){
   const p=calcPnl(c);
   const A="#f0a500",G="#00c850",R="#dc3232";
   const sc={won:G,lost:R,pending:A}[c.status];
-  const sbg={won:"rgba(0,200,80,0.06)",lost:"rgba(220,50,50,0.05)",pending:"rgba(240,165,0,0.04)"}[c.status];
-  const sbd={won:"#0d2e1a",lost:"#2a1010",pending:"#2a1e00"}[c.status];
+  const sbg={won:"rgba(0,200,80,0.06)",lost:"rgba(220,50,50,0.05)",pending:"rgba(240,165,0,0.08)"}[c.status];
+  const sbd={won:"#0d2e1a",lost:"#2a1010",pending:"rgba(240,165,0,0.5)"}[c.status];
+  const isPending=c.status==="pending";
   return (
-    <div style={{background:sbg,border:`1px solid ${sbd}`,borderRadius:10,marginBottom:8,overflow:"hidden",width:"100%"}}>
+    <div className={isPending?"pending-card":""} style={{background:sbg,border:`${isPending?"2px":"1px"} solid ${sbd}`,borderRadius:10,marginBottom:8,overflow:"hidden",width:"100%"}}>
+      {isPending&&(
+        <div style={{background:"rgba(240,165,0,0.12)",borderBottom:"1px solid rgba(240,165,0,0.25)",padding:"5px 14px",display:"flex",alignItems:"center",gap:8}}>
+          <div className="pending-dot" style={{width:7,height:7,borderRadius:"50%",background:A,flexShrink:0}}/>
+          <span style={{fontSize:12,color:A,fontWeight:600,letterSpacing:"0.08em"}}>OCZEKUJE NA ROZLICZENIE</span>
+        </div>
+      )}
       <div onClick={onToggle} style={{padding:"13px 14px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
         <div style={{width:9,height:9,borderRadius:"50%",background:sc,boxShadow:`0 0 6px ${sc}80`,flexShrink:0}}/>
         <span style={{fontSize:13,color:"#555",width:70,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.bk}</span>
