@@ -12,7 +12,26 @@ const todayISO = () => {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 };
 const fmt = (n) => `${n>=0?"+":""}${n.toFixed(2)} zł`;
-const pnl = (c) => c.status==="won" ? c.odds*c.stake-c.stake : c.status==="lost" ? -c.stake : 0;
+const pnl = (c, taxRate=0) => {
+  const tax = taxRate/100;
+  if (c.status==="cashout") {
+    const co = c.cashoutAmount||0;
+    const cost = c.isFreebet ? 0 : c.stake;
+    const gross = co - cost;
+    return gross > 0 ? gross*(1-tax) : gross;
+  }
+  if (c.status==="won") {
+    if (c.isFreebet) {
+      // SNR (stake not returned) - only profit
+      const gross = c.freebetSR ? c.odds*c.stake-c.stake : (c.odds-1)*c.stake;
+      return gross > 0 ? gross*(1-tax) : gross;
+    }
+    const gross = c.odds*c.stake - c.stake;
+    return gross > 0 ? gross*(1-tax) : gross;
+  }
+  if (c.status==="lost") return c.isFreebet ? 0 : -c.stake;
+  return 0;
+};
 const ls = {
   get: (k,fb) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):fb; } catch { return fb; } },
   set: (k,v) => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} },
@@ -26,9 +45,50 @@ const grpByDate = (arr) => {
   return g;
 };
 const csvExport = (cs) => {
-  const rows = [["Data","Buk","Notatka","Kurs","Stawka","Status","P&L"],...cs.map(c=>[c.date,c.bk,`"${c.note}"`,c.odds,c.stake,c.status,pnl(c).toFixed(2)])];
+  const rows = [["Data","Buk","Notatka","Kurs","Stawka","Status","P&L","Freebet","Cashout"],...cs.map(c=>[c.date,c.bk,`"${c.note}"`,c.odds,c.stake,c.status,pnl(c).toFixed(2),c.isFreebet?"TAK":"",c.cashoutAmount||""])];
   const blob = new Blob([rows.map(r=>r.join(",")).join("\n")], {type:"text/csv"});
   const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="tasma.csv"; a.click();
+};
+
+const jsonExport = (data) => {
+  const payload = {
+    version: 2,
+    exportDate: new Date().toISOString(),
+    coupons: data.coupons,
+    bankroll: data.bankroll,
+    settings: data.settings,
+    withdrawals: data.withdrawals,
+    templates: data.templates,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `tasma-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+};
+
+const jsonImport = (file, callbacks) => {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.coupons || !Array.isArray(data.coupons)) {
+        alert("Nieprawidłowy plik backup — brak listy kuponów.");
+        return;
+      }
+      if (window.confirm(`Importować ${data.coupons.length} kuponów? Aktualne dane zostaną zastąpione.`)) {
+        callbacks.setCoupons(data.coupons);
+        if (data.bankroll !== undefined) callbacks.setBankroll(data.bankroll);
+        if (data.settings)    callbacks.setSettings(s=>({...s,...data.settings}));
+        if (data.withdrawals) callbacks.setWithdrawals(data.withdrawals);
+        if (data.templates)   callbacks.setTemplates(data.templates);
+        alert(`✓ Zaimportowano ${data.coupons.length} kuponów z ${data.exportDate?.slice(0,10)||"?"}`);
+      }
+    } catch {
+      alert("Błąd odczytu pliku. Upewnij się że to plik .json z Taśma Trackera.");
+    }
+  };
+  reader.readAsText(file);
 };
 
 const SEED = [
@@ -77,7 +137,7 @@ const ACH = [
 export default function App() {
   const [coupons,     setCoupons]     = useState(() => ls.get(SK, SEED));
   const [bankroll,    setBankroll]    = useState(() => ls.get(BK, 500));
-  const [settings,    setSettings]    = useState(() => ls.get(SK2, {goalBankroll:2000, dayLoss:50, weekLoss:150}));
+  const [settings,    setSettings]    = useState(() => ls.get(SK2, {goalBankroll:2000, dayLoss:50, weekLoss:150, taxRate:0}));
   const [withdrawals, setWithdrawals] = useState(() => ls.get(SK3, []));
   const [templates,   setTemplates]   = useState(() => ls.get(SK4, []));
   const [usedKelly,   setUsedKelly]   = useState(() => ls.get("tuk", false));
@@ -100,6 +160,7 @@ export default function App() {
   const [showTpl,  setShowTpl]  = useState(false);
 
   const firstRender = useRef(true);
+  const importRef   = useRef(null);
   const stakeRef=useRef(), oddsRef=useRef(), legRef=useRef();
 
   // Save to localStorage
@@ -111,7 +172,7 @@ export default function App() {
   useEffect(() => { ls.set("tuk",usedKelly); }, [usedKelly]);
 
   // Form
-  const blank = {date:todayISO(), bk:"Superbet", stake:"15", odds:"", legs:[], note:"", status:"pending"};
+  const blank = {date:todayISO(), bk:"Superbet", stake:"15", odds:"", legs:[], note:"", status:"pending", isFreebet:false, freebetSR:false, cashoutAmount:""};
   const [form, setForm] = useState(blank);
   const [legM, setLegM] = useState("");
   const [legS, setLegS] = useState("");
@@ -137,7 +198,8 @@ export default function App() {
   };
 
   const mark = (id,st) => setCoupons(p=>p.map(c=>c.id===id?{...c,status:st}:c));
-  const del  = (id)    => setCoupons(p=>p.filter(c=>c.id!==id));
+  const del       = (id)    => setCoupons(p=>p.filter(c=>c.id!==id));
+  const markCashout = (id,amt) => setCoupons(p=>p.map(c=>c.id===id?{...c,status:"cashout",cashoutAmount:amt}:c));
 
   const saveWd = () => {
     if (!wdForm.amount) return;
@@ -156,10 +218,11 @@ export default function App() {
 
   // ── Stats ──────────────────────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const settled  = coupons.filter(c=>c.status!=="pending");
+    const settled  = coupons.filter(c=>c.status==="won"||c.status==="lost"||c.status==="cashout");
     const wonList  = coupons.filter(c=>c.status==="won");
     const staked   = settled.reduce((s,c)=>s+c.stake, 0);
-    const totalPnl = settled.reduce((s,c)=>s+pnl(c), 0);
+    const taxRate = settings?.taxRate||0;
+    const totalPnl = settled.reduce((s,c)=>s+pnl(c,taxRate), 0);
     const roi      = staked>0 ? (totalPnl/staked)*100 : 0;
     const bnow     = bankroll + totalPnl;
     const totalW   = withdrawals.reduce((s,w)=>s+w.amount, 0);
@@ -189,9 +252,9 @@ export default function App() {
     const maxOdds = coupons.length>0 ? Math.max(...coupons.map(c=>c.odds)) : 0;
 
     const todayT  = todayISO();
-    const todayPnl= coupons.filter(c=>c.date===todayT&&c.status!=="pending").reduce((s,c)=>s+pnl(c),0);
+    const todayPnl= coupons.filter(c=>c.date===todayT&&c.status!=="pending").reduce((s,c)=>s+pnl(c,taxRate),0);
     const wAgo    = new Date(); wAgo.setDate(wAgo.getDate()-7);
-    const weekPnl = settled.filter(c=>new Date(c.date)>=wAgo).reduce((s,c)=>s+pnl(c),0);
+    const weekPnl = settled.filter(c=>new Date(c.date)>=wAgo).reduce((s,c)=>s+pnl(c,taxRate),0);
 
     // Legs buckets
     const legsBuckets={};
@@ -201,19 +264,19 @@ export default function App() {
       if(!legsBuckets[b])legsBuckets[b]={w:0,t:0,p:0};
       legsBuckets[b].t++;
       if(c.status==="won")legsBuckets[b].w++;
-      legsBuckets[b].p+=pnl(c);
+      legsBuckets[b].p+=pnl(c,taxRate);
     });
 
     // Day of week
     const dow=Array(7).fill(null).map(()=>({w:0,t:0,p:0}));
-    settled.forEach(c=>{const d=new Date(c.date).getDay();dow[d].t++;if(c.status==="won")dow[d].w++;dow[d].p+=pnl(c);});
+    settled.forEach(c=>{const d=new Date(c.date).getDay();dow[d].t++;if(c.status==="won")dow[d].w++;dow[d].p+=pnl(c,taxRate);});
 
     // Monthly
     const monthly={};
     settled.forEach(c=>{
       const mo=c.date.slice(0,7);
       if(!monthly[mo])monthly[mo]={stk:0,p:0,w:0,t:0};
-      monthly[mo].stk+=c.stake;monthly[mo].p+=pnl(c);monthly[mo].t++;
+      monthly[mo].stk+=c.stake;monthly[mo].p+=pnl(c,taxRate);monthly[mo].t++;
       if(c.status==="won")monthly[mo].w++;
     });
 
@@ -221,7 +284,7 @@ export default function App() {
     let runBr=bankroll,runSt=0;
     const brHistory=[{v:bankroll,st:0}];
     sorted.filter(c=>c.status!=="pending").forEach(c=>{
-      runBr+=pnl(c);
+      runBr+=pnl(c,taxRate);
       runSt=c.status==="won"?(runSt>0?runSt+1:1):(runSt<0?runSt-1:-1);
       brHistory.push({v:runBr,st:runSt});
     });
@@ -339,12 +402,13 @@ export default function App() {
       onWon={()=>mark(c.id,"won")}
       onLost={()=>mark(c.id,"lost")}
       onPending={()=>mark(c.id,"pending")}
+      onCashout={(amt)=>markCashout(c.id,amt)}
       onEdit={()=>openEdit(c)}
       onDelete={()=>del(c.id)}/>
   ));
 
   const DayGroup = ({date,cs}) => {
-    const dp=cs.filter(c=>c.status!=="pending").reduce((s,c)=>s+pnl(c),0);
+    const dp=cs.filter(c=>c.status!=="pending").reduce((s,c)=>s+pnl(c,settings.taxRate||0),0);
     const hp=cs.some(c=>c.status==="pending");
     return(
       <div>
@@ -480,12 +544,64 @@ export default function App() {
                 <option value="pending">⏳ Oczekujący</option>
                 <option value="won">✅ Wygrany</option>
                 <option value="lost">❌ Przegrany</option>
+                <option value="cashout">💰 Cashout</option>
               </select>
             </div>
-            {payPrev&&(
-              <div style={{background:"rgba(240,165,0,.07)",border:"1px solid rgba(240,165,0,.18)",borderRadius:8,padding:"11px 14px",marginBottom:12,fontSize:16}}>
-                <span style={{color:"#666"}}>Wygrana: </span><b style={{color:A}}>{payPrev.toFixed(2)} zł</b>
-                {"   "}<span style={{color:"#666"}}>Zysk: </span><b style={{color:G}}>+{profPrev.toFixed(2)} zł</b>
+
+            {/* Cashout amount */}
+            {form.status==="cashout"&&(
+              <div style={{marginBottom:12}} className="fd">
+                <div style={{fontSize:12,color:"#555",marginBottom:5}}>KWOTA CASHOUT (ZŁ)</div>
+                <input type="number" step="0.01" placeholder="np. 35.50" value={form.cashoutAmount}
+                  onChange={e=>setForm(f=>({...f,cashoutAmount:e.target.value}))}
+                  style={inp({fontSize:20,fontWeight:500,color:"#00c850"})}/>
+                {form.cashoutAmount&&form.stake&&(
+                  <div style={{fontSize:13,color:"#555",marginTop:6}}>
+                    Zysk z cashout: <b style={{color:+form.cashoutAmount-(form.isFreebet?0:+form.stake)>=0?"#00c850":"#dc3232"}}>{fmt((+form.cashoutAmount-(form.isFreebet?0:+form.stake))*(1-(settings.taxRate||0)/100))}</b>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Freebet toggle */}
+            <div style={{marginBottom:12,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              <button className="tap" onClick={()=>setForm(f=>({...f,isFreebet:!f.isFreebet}))}
+                style={{background:form.isFreebet?"rgba(0,150,255,.15)":"#060810",border:`1px solid ${form.isFreebet?"#1a6fff":"#1e2535"}`,color:form.isFreebet?"#5a9fff":"#666",borderRadius:8,padding:"9px 16px",fontSize:14,fontWeight:600,cursor:"pointer",transition:"all .15s"}}>
+                🎟️ FREEBET {form.isFreebet?"✓":""}
+              </button>
+              {form.isFreebet&&(
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={{fontSize:12,color:"#555"}}>Typ freebeta:</span>
+                  <button className="tap" onClick={()=>setForm(f=>({...f,freebetSR:false}))}
+                    style={{background:!form.freebetSR?"rgba(0,150,255,.15)":"#060810",border:`1px solid ${!form.freebetSR?"#1a6fff":"#1e2535"}`,color:!form.freebetSR?"#5a9fff":"#666",borderRadius:6,padding:"6px 12px",fontSize:12,cursor:"pointer"}}>
+                    SNR (bez stawki)
+                  </button>
+                  <button className="tap" onClick={()=>setForm(f=>({...f,freebetSR:true}))}
+                    style={{background:form.freebetSR?"rgba(0,150,255,.15)":"#060810",border:`1px solid ${form.freebetSR?"#1a6fff":"#1e2535"}`,color:form.freebetSR?"#5a9fff":"#666",borderRadius:6,padding:"6px 12px",fontSize:12,cursor:"pointer"}}>
+                    SR (ze stawką)
+                  </button>
+                </div>
+              )}
+            </div>
+            {payPrev&&form.status!=="cashout"&&(
+              <div style={{background:"rgba(240,165,0,.07)",border:"1px solid rgba(240,165,0,.18)",borderRadius:8,padding:"11px 14px",marginBottom:12,fontSize:14}}>
+                {form.isFreebet?(
+                  <>
+                    <span style={{color:"#5a9fff",fontSize:12,fontWeight:600}}>🎟️ FREEBET</span>
+                    {" · "}
+                    <span style={{color:"#666"}}>Zysk netto: </span>
+                    <b style={{color:G}}>+{((form.freebetSR?payPrev-+form.stake:(+form.odds-1)*+form.stake)*(1-(settings.taxRate||0)/100)).toFixed(2)} zł</b>
+                    {settings.taxRate>0&&<span style={{fontSize:11,color:"#444"}}> (po {settings.taxRate}% podatku)</span>}
+                  </>
+                ):(
+                  <>
+                    <span style={{color:"#666"}}>Wygrana: </span><b style={{color:A}}>{payPrev.toFixed(2)} zł</b>
+                    {"   "}
+                    <span style={{color:"#666"}}>Zysk: </span>
+                    <b style={{color:G}}>+{(profPrev*(1-(settings.taxRate||0)/100)).toFixed(2)} zł</b>
+                    {settings.taxRate>0&&<span style={{fontSize:11,color:"#444"}}> (po {settings.taxRate}% podatku)</span>}
+                  </>
+                )}
               </div>
             )}
             {form.legs.length>0&&(
@@ -792,10 +908,31 @@ export default function App() {
             )}
           </div>
 
-          <button className="tap" onClick={()=>csvExport(coupons)}
-            style={{width:"100%",background:"#0d1117",border:"1px solid #1a2030",color:"#888",borderRadius:10,padding:"14px",fontSize:15,cursor:"pointer",marginBottom:14}}>
-            📤 Eksportuj do CSV
-          </button>
+          {/* Export / Import */}
+          <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"16px",marginBottom:14}}>
+            <div style={{fontSize:14,color:"#444",marginBottom:12}}>📤 EKSPORT / IMPORT</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button className="tap" onClick={()=>jsonExport({coupons,bankroll,settings,withdrawals,templates})}
+                style={{flex:1,minWidth:140,background:"rgba(0,200,80,.1)",border:"1px solid rgba(0,200,80,.3)",color:"#00c850",borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+                💾 Backup JSON
+              </button>
+              <button className="tap" onClick={()=>csvExport(coupons)}
+                style={{flex:1,minWidth:140,background:"rgba(0,150,255,.1)",border:"1px solid rgba(0,150,255,.3)",color:"#5a9fff",borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+                📊 Eksport CSV
+              </button>
+              <button className="tap" onClick={()=>importRef.current?.click()}
+                style={{flex:1,minWidth:140,background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",color:"#f0a500",borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+                📥 Import JSON
+              </button>
+            </div>
+            <input ref={importRef} type="file" accept=".json" style={{display:"none"}}
+              onChange={e=>{if(e.target.files[0])jsonImport(e.target.files[0],{setCoupons,setBankroll,setSettings,setWithdrawals,setTemplates});e.target.value="";}}/>
+            <div style={{fontSize:11,color:"#333",marginTop:10}}>
+              💾 Backup JSON — pełna kopia wszystkich danych (kupony, ustawienia, szablony, wypłaty)<br/>
+              📊 CSV — do Excela/Arkuszy<br/>
+              📥 Import — wczytaj plik .json z poprzedniego backupu
+            </div>
+          </div>
         </>}
 
         {/* ── OSIĄGNIĘCIA ── */}
@@ -822,6 +959,25 @@ export default function App() {
         {/* ── USTAWIENIA ── */}
         {view==="cfg"&&<>
           <div style={{fontSize:16,fontWeight:500,color:"#d4d8e8",marginBottom:16}}>Ustawienia</div>
+
+          {/* Tax rate */}
+          <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px",marginBottom:10}}>
+            <div style={{fontSize:15,color:"#d4d8e8",marginBottom:3}}>🧾 Podatek od wygranej (%)</div>
+            <div style={{fontSize:12,color:"#444",marginBottom:8}}>Odliczany od zysku przy obliczeniach (PL: 10% powyżej 2280 zł, ustaw 0 jeśli buk potrąca sam)</div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {[0,10,12].map(v=>(
+                <button key={v} className="tap" onClick={()=>setSettings(s=>({...s,taxRate:v}))}
+                  style={{background:settings.taxRate===v?"rgba(240,165,0,.15)":"#060810",border:`1px solid ${settings.taxRate===v?A:"#1e2535"}`,color:settings.taxRate===v?A:"#666",borderRadius:7,padding:"8px 14px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+                  {v}%
+                </button>
+              ))}
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <input type="number" min="0" max="99" value={settings.taxRate} onChange={e=>setSettings(s=>({...s,taxRate:+e.target.value}))}
+                  style={{...smInp(),color:A,width:80,fontSize:16}}/>
+                <span style={{fontSize:14,color:"#666"}}>%</span>
+              </div>
+            </div>
+          </div>
 
           {[{k:"goalBankroll",l:"🎯 Cel bankrolla (zł)",d:"Do jakiej kwoty chcesz dobić"},{k:"dayLoss",l:"⚠️ Dzienny limit straty (zł)",d:"Alert gdy przekroczysz w ciągu dnia"},{k:"weekLoss",l:"⚠️ Tygodniowy limit straty (zł)",d:"Alert gdy przekroczysz w ciągu tygodnia"}].map(({k,l,d})=>(
             <div key={k} style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px",marginBottom:10}}>
@@ -922,12 +1078,15 @@ export default function App() {
 }
 
 // ── Coupon Card ───────────────────────────────────────────────────────────────
-function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onEdit,onDelete}){
+function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onCashout,onEdit,onDelete}){
+  const [showCO, setShowCO] = useState(false);
+  const [coAmt, setCoAmt] = useState("");
   const p=pnl(c);
   const A="#f0a500",G="#00c850",R="#dc3232";
-  const sc={won:G,lost:R,pending:A}[c.status];
-  const sbg={won:"rgba(0,200,80,.06)",lost:"rgba(220,50,50,.05)",pending:"rgba(240,165,0,.08)"}[c.status];
-  const sbd={won:"#0d2e1a",lost:"#2a1010",pending:"rgba(240,165,0,.5)"}[c.status];
+  const co=c.status==="cashout";
+  const sc={won:G,lost:R,pending:A,cashout:"#00c8c8"}[c.status]||"#555";
+  const sbg={won:"rgba(0,200,80,.06)",lost:"rgba(220,50,50,.05)",pending:"rgba(240,165,0,.08)",cashout:"rgba(0,200,200,.06)"}[c.status]||"#0d1117";
+  const sbd={won:"#0d2e1a",lost:"#2a1010",pending:"rgba(240,165,0,.5)",cashout:"#0d2e2e"}[c.status]||"#1a2030";
   const isPending=c.status==="pending";
   return(
     <div className={isPending?"pc":""} style={{background:sbg,border:`${isPending?"2px":"1px"} solid ${sbd}`,borderRadius:10,marginBottom:8,overflow:"hidden",width:"100%"}}>
@@ -939,15 +1098,17 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onEdit,onDelete}
       )}
       <div className="hov" onClick={onToggle} style={{padding:"13px 14px",display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
         <div style={{width:9,height:9,borderRadius:"50%",background:sc,boxShadow:`0 0 6px ${sc}80`,flexShrink:0}}/>
-        <span style={{fontSize:13,color:"#555",width:70,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.bk}</span>
+        <span style={{fontSize:13,color:"#555",width:c.isFreebet?50:70,flexShrink:0,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.bk}</span>
+        {c.isFreebet&&<span style={{background:"rgba(0,150,255,.18)",color:"#5a9fff",borderRadius:4,padding:"2px 5px",fontSize:10,fontWeight:700,flexShrink:0,letterSpacing:".04em"}}>FREE</span>}
+        {c.isFreebet&&<span style={{background:"rgba(0,150,255,.15)",color:"#5a9fff",borderRadius:4,padding:"1px 5px",fontSize:10,fontWeight:700,flexShrink:0}}>FB</span>}
         <span style={{flex:1,fontSize:15,color:"#7a8499",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",minWidth:0}}>{c.note||"—"}</span>
         <span style={{background:"rgba(240,165,0,.12)",color:A,borderRadius:6,padding:"3px 9px",fontSize:14,fontWeight:600,flexShrink:0,whiteSpace:"nowrap"}}>
           ×{c.odds>=10000?c.odds.toLocaleString():c.odds.toFixed(2)}
         </span>
         <span style={{fontSize:15,fontWeight:500,color:"#d4d8e8",flexShrink:0,width:46,textAlign:"right"}}>{c.stake}zł</span>
         {!isPending&&(
-          <span style={{background:p>0?"rgba(0,200,80,.15)":"rgba(220,50,50,.15)",color:p>0?G:R,borderRadius:6,padding:"3px 9px",fontSize:14,fontWeight:600,flexShrink:0,whiteSpace:"nowrap"}}>
-            {p>=0?"+":""}{p.toFixed(0)}zł
+          <span style={{background:co?"rgba(0,200,200,.15)":p>0?"rgba(0,200,80,.15)":"rgba(220,50,50,.15)",color:co?"#00c8c8":p>0?G:R,borderRadius:6,padding:"3px 9px",fontSize:14,fontWeight:600,flexShrink:0,whiteSpace:"nowrap"}}>
+            {co?`CO: ${(c.cashoutAmount||0)}zł`:`${p>=0?"+":""}${p.toFixed(0)}zł`}
           </span>
         )}
         <span style={{fontSize:12,color:"#333",flexShrink:0}}>{expanded?"▲":"▼"}</span>
@@ -969,12 +1130,25 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onEdit,onDelete}
       )}
       <div style={{padding:"0 12px 12px",display:"flex",gap:6}}>
         {isPending&&<>
-          <button onClick={onWon}  style={{flex:1,background:"rgba(0,200,80,.14)",border:"1px solid #0d3018",color:G,borderRadius:7,padding:"10px",fontSize:14,fontWeight:700,cursor:"pointer"}}>✓ WYGRANY</button>
-          <button onClick={onLost} style={{flex:1,background:"rgba(220,50,50,.12)",border:"1px solid #3a1010",color:R,borderRadius:7,padding:"10px",fontSize:14,fontWeight:700,cursor:"pointer"}}>✗ PRZEGRANY</button>
+          <button onClick={onWon}  style={{flex:1,background:"rgba(0,200,80,.14)",border:"1px solid #0d3018",color:G,borderRadius:7,padding:"10px",fontSize:13,fontWeight:700,cursor:"pointer"}}>✓ WYGRANY</button>
+          <button onClick={onLost} style={{flex:1,background:"rgba(220,50,50,.12)",border:"1px solid #3a1010",color:R,borderRadius:7,padding:"10px",fontSize:13,fontWeight:700,cursor:"pointer"}}>✗ PRZEGRANY</button>
+          <button onClick={()=>setShowCO(s=>!s)} style={{background:showCO?"rgba(0,200,200,.25)":"rgba(0,200,200,.12)",border:"1px solid #0d2e2e",color:"#00c8c8",borderRadius:7,padding:"10px 8px",fontSize:11,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>💰 CO</button>
         </>}
         {!isPending&&<button onClick={onPending} style={{background:"rgba(240,165,0,.08)",border:"1px solid rgba(240,165,0,.2)",color:A,borderRadius:7,padding:"10px 14px",fontSize:14,fontWeight:600,cursor:"pointer"}}>↩ COFNIJ</button>}
         <button onClick={e=>{e.stopPropagation();onEdit();}} style={{background:"none",border:"1px solid #1a2030",color:"#555",borderRadius:7,padding:"10px 14px",fontSize:14,cursor:"pointer"}}>✏ EDYTUJ</button>
       </div>
+      {showCO&&isPending&&(
+        <div style={{padding:"0 12px 12px",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <span style={{fontSize:13,color:"#00c8c8"}}>Kwota cashout:</span>
+          <input type="number" step="0.01" placeholder="np. 35.50" value={coAmt} onChange={e=>setCoAmt(e.target.value)}
+            style={{background:"#060810",border:"1px solid #0d2e2e",borderRadius:7,padding:"8px 12px",color:"#00c8c8",fontFamily:"inherit",fontSize:15,outline:"none",width:120}}/>
+          <button onClick={()=>{if(coAmt)onCashout(+coAmt);setShowCO(false);setCoAmt("");}}
+            style={{background:"rgba(0,200,200,.2)",border:"1px solid #0d2e2e",color:"#00c8c8",borderRadius:7,padding:"8px 14px",fontFamily:"inherit",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+            ZATWIERDŹ
+          </button>
+          <span style={{fontSize:12,color:"#444"}}>Zysk: <b style={{color:+coAmt-(c.isFreebet?0:c.stake)>=0?"#00c8c8":"#dc3232"}}>{coAmt?`${(+coAmt-(c.isFreebet?0:c.stake))>=0?"+":""}${(+coAmt-(c.isFreebet?0:c.stake)).toFixed(2)} zł`:""}</b></span>
+        </div>
+      )}
     </div>
   );
 }
