@@ -57,6 +57,31 @@ const calcEdge    = (odds, prob) => ((odds*prob)-1)*100;
 const evStatus    = (ev) => ev>0.02?"value":ev>-0.02?"neutral":"bad";
 const evColor     = (ev,A,G,R) => ev>0.02?G:ev>-0.02?A:R;
 
+// Edge interpretation
+const edgeLabel = (edge) => {
+  if(edge>20)  return {label:"⚠️ Nierealistyczna",color:"#ff8c00",warn:true};
+  if(edge>10)  return {label:"Wysoka przewaga",  color:"#00c850",warn:false};
+  if(edge>=3)  return {label:"Umiarkowana",       color:"#00c850",warn:false};
+  if(edge>=0)  return {label:"Niska przewaga",    color:"#f0a500",warn:false};
+  return             {label:"Brak przewagi",      color:"#dc3232",warn:false};
+};
+
+// Decision engine
+const calcDecision = (opts) => {
+  const {ev, edge, streak, kellyPct, bankroll, segN, usingImplied} = opts;
+  const lossStreak = streak<0 ? Math.abs(streak) : 0;
+
+  if(lossStreak>=20)      return {level:"stop",   label:"STOP BETTING",     color:"#dc3232", msg:"Seria 20+ przegranych. Zatrzymaj się całkowicie."};
+  if(ev<0)                return {level:"no",     label:"NIE GRAJ",         color:"#dc3232", msg:"Ujemne EV — matematycznie opłaca się nie grać."};
+  if(lossStreak>=10)      return {level:"caution",label:"OSTROŻNIE",        color:"#f0a500", msg:`Seria ${lossStreak} przegranych. Zmniejsz stawkę o 50%.`};
+  if(segN<30&&usingImplied) return {level:"caution",label:"OSTROŻNIE",     color:"#f0a500", msg:"Za mało danych historycznych — decyzja niepewna."};
+  if(edge<1&&edge>=0)     return {level:"caution",label:"NISKA PRZEWAGA",   color:"#f0a500", msg:"Edge poniżej 1% — niemal brak matematycznej przewagi."};
+  if(lossStreak>=5)       return {level:"caution",label:"OSTROŻNIE",        color:"#f0a500", msg:`Seria ${lossStreak} przegranych. Rozważ zmniejszenie stawki.`};
+  if(kellyPct>5)          return {level:"caution",label:"WYSOKA STAWKA",    color:"#f0a500", msg:"Kelly sugeruje więcej niż 5% bankrolla — cap aktywny."};
+  if(ev>0&&edge>=3)       return {level:"ok",     label:"OK TO BET",        color:"#00c850", msg:"Pozytywne EV i wystarczająca przewaga."};
+  return                         {level:"ok",     label:"OK",               color:"#00c850", msg:"Brak sygnałów ostrzegawczych."};
+};
+
 // ─── Odds range helper ───────────────────────────────────────────────────────
 const oddsRange = (odds) => odds<2?"<2.0":odds<=5?"2.0–5.0":">5.0";
 
@@ -387,10 +412,21 @@ export default function App(){
     if(cur>0)lossRuns.push(cur);
     const avgLS=lossRuns.length>0?lossRuns.reduce((s,v)=>s+v,0)/lossRuns.length:0;
 
+    // Quality metrics
+    const pnlList=settled.map(c=>calcPnl(c,taxRate));
+    const winPnls=wonList.map(c=>calcPnl(c,taxRate)).filter(v=>v>0).sort((a,b)=>b-a);
+    const lossPnls=settled.filter(c=>c.status==="lost").map(c=>calcPnl(c,taxRate)).sort((a,b)=>a-b);
+    const profitDep=totalPnl>0&&winPnls.length>0?((winPnls[0]/totalPnl)*100):0;
+    const medWin=winPnls.length>0?winPnls[Math.floor(winPnls.length/2)]:0;
+    const medLoss=lossPnls.length>0?lossPnls[Math.floor(lossPnls.length/2)]:0;
+    const top3Pnl=winPnls.slice(0,3).reduce((s,v)=>s+v,0);
+    const concentration=totalPnl>0&&winPnls.length>0?((top3Pnl/totalPnl)*100):0;
+
     return{staked,totalPnl,roi,bnow,totalW,won:wonList.length,lost:coupons.filter(c=>c.status==="lost").length,
       total:coupons.length,winRate:settled.length>0?(wonList.length/settled.length)*100:0,
       todayPnl,weekPnl,streak,maxWS,maxLS,maxAD,maxWin,maxOdds,
-      legsBuckets,dow,monthly,brHistory,streakHistory,valueCount,segWR,avgLS};
+      legsBuckets,dow,monthly,brHistory,streakHistory,valueCount,segWR,avgLS,
+      profitDep,medWin,medLoss,concentration,winPnls,lossPnls};
   },[coupons,bankroll,withdrawals,settings,statsRange]);
 
   // ── Kelly calculation ─────────────────────────────────────────────────────
@@ -404,9 +440,10 @@ export default function App(){
     const fAdj=Math.min(Math.max(0,f)*multiplier,0.05); // cap 5% bankroll
     const capped=fAdj>=0.05;
     const confidence=segData.n>=50?"alta":segData.n>=20?"media":"niskie";
-    const smallSample=segData.n<20;
+    const smallSample=segData.n<30;
+    const usingImplied=!kWinP&&segData.n<30;
     return{full:Math.max(0,f*100).toFixed(1),adjusted:(fAdj*100).toFixed(2),stake:(fAdj*stats.bnow).toFixed(2),
-      edge:((wp*o-1)*100).toFixed(1),capped,confidence,smallSample,sampleN:segData.n,
+      edge:((wp*o-1)*100).toFixed(1),capped,confidence,smallSample,usingImplied,sampleN:segData.n,
       wr:(wp*100).toFixed(1),mode:kellyMode};
   },[kOdds,kWinP,kellyMode,kSegment,stats]);
 
@@ -1159,9 +1196,9 @@ export default function App(){
                 ))}
               </div>
             </div>
-            {stats.segWR[kSegment]?.n<20&&(
+            {stats.segWR[kSegment]?.n<30&&(
               <div style={{background:"rgba(240,165,0,.08)",border:"1px solid rgba(240,165,0,.2)",borderRadius:7,padding:"8px 12px",marginBottom:10,fontSize:12,color:A}}>
-                ⚠️ Mała próbka ({stats.segWR[kSegment]?.n} kuponów) — wynik może być losowy. Potrzeba min. 20.
+                ⚠️ Mała próbka ({stats.segWR[kSegment]?.n} kuponów) — wynik może być losowy. Potrzeba min. 30. Użyto implied probability z kursu.
               </div>
             )}
             <div style={{display:"flex",gap:10,marginBottom:12,flexWrap:"wrap"}}>
@@ -1174,17 +1211,38 @@ export default function App(){
                 <input type="number" placeholder={`auto: ${(stats.segWR[kSegment]?.wr||stats.winRate).toFixed(1)}%`} value={kWinP} onChange={e=>setKWinP(e.target.value)} style={inp({fontSize:16})}/>
               </div>
             </div>
-            {kelly&&(
-              <div style={{background:"rgba(240,165,0,.07)",border:"1px solid rgba(240,165,0,.2)",borderRadius:8,padding:"14px"}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-                  {[{l:`Kelly (${kellyMode==="full"?"pełny":kellyMode==="half"?"½":"¼"})`,v:`${kelly.adjusted}% bankrolla`,c:A},{l:"Sugerowana stawka",v:`${kelly.stake} zł`,c:G},{l:"Twoja przewaga",v:`${kelly.edge}%`,c:+kelly.edge>0?G:R},{l:"Confidence",v:kelly.confidence==="alta"?"🟢 wysoka":kelly.confidence==="media"?"🟡 średnia":"🔴 niska",c:"#d4d8e8"}].map(({l,v,c})=>(
-                    <div key={l}><div style={{fontSize:11,color:"#444",marginBottom:3}}>{l}</div><div style={{fontSize:16,fontWeight:600,color:c}}>{v}</div></div>
-                  ))}
+            {kelly&&(()=>{
+              const dec=calcDecision({ev:+kelly.edge/100,edge:+kelly.edge,streak:stats.streak,kellyPct:+kelly.adjusted,bankroll:stats.bnow,segN:kelly.sampleN,usingImplied:kelly.usingImplied});
+              const el=edgeLabel(+kelly.edge);
+              return(
+                <div style={{background:"rgba(240,165,0,.07)",border:"1px solid rgba(240,165,0,.2)",borderRadius:8,padding:"14px"}}>
+                  {/* Decision badge */}
+                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,padding:"10px 12px",background:`${dec.color}18`,border:`1px solid ${dec.color}40`,borderRadius:8}}>
+                    <div style={{width:10,height:10,borderRadius:"50%",background:dec.color,flexShrink:0}}/>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:700,color:dec.color,letterSpacing:".05em"}}>{dec.label}</div>
+                      <div style={{fontSize:12,color:"#666",marginTop:2}}>{dec.msg}</div>
+                    </div>
+                  </div>
+                  {/* Edge interpretation */}
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,fontSize:13}}>
+                    <span style={{color:"#555"}}>Interpretacja edge:</span>
+                    <span style={{color:el.color,fontWeight:600}}>{el.label}</span>
+                    {el.warn&&<span style={{fontSize:11,color:"#ff8c00"}}> · sprawdź dane</span>}
+                  </div>
+                  {el.warn&&<div style={{background:"rgba(255,140,0,.08)",border:"1px solid rgba(255,140,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#ff8c00"}}>⚠️ Nierealistycznie wysoka przewaga (&gt;20%) — sprawdź czy dane są poprawne. Profesjonalni gracze operują na 1–5%.</div>}
+                  {kelly.usingImplied&&<div style={{background:"rgba(90,159,255,.08)",border:"1px solid rgba(90,159,255,.2)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#5a9fff"}}>ℹ️ Użyto implied probability z kursu — za mało danych historycznych (min. 30 w segmencie)</div>}
+                  {!kelly.usingImplied&&kelly.smallSample&&<div style={{background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:A}}>⚠️ Mała próbka ({kelly.sampleN} kuponów) — wynik może być losowy. Potrzeba min. 30.</div>}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+                    {[{l:`Kelly (${kellyMode==="full"?"pełny":kellyMode==="half"?"½":"¼"})`,v:`${kelly.adjusted}% bankrolla`,c:A},{l:"Sugerowana stawka",v:`${kelly.stake} zł`,c:G},{l:"Twoja przewaga",v:`${kelly.edge}%`,c:+kelly.edge>0?G:R},{l:"Confidence",v:kelly.confidence==="alta"?"🟢 wysoka":kelly.confidence==="media"?"🟡 średnia":"🔴 niska",c:"#d4d8e8"}].map(({l,v,c})=>(
+                      <div key={l}><div style={{fontSize:11,color:"#444",marginBottom:3}}>{l}</div><div style={{fontSize:15,fontWeight:600,color:c}}>{v}</div></div>
+                    ))}
+                  </div>
+                  {kelly.capped&&<div style={{fontSize:12,color:A,marginBottom:4}}>⚠ Ucięto do 5% bankrolla ({(stats.bnow*0.05).toFixed(2)} zł max)</div>}
+                  {+kelly.edge<=0&&<div style={{fontSize:12,color:R}}>⚠️ Ujemna przewaga — matematycznie nie opłaca się grać.</div>}
                 </div>
-                {kelly.capped&&<div style={{fontSize:12,color:A,marginBottom:6}}>⚠ Ucięto do 5% bankrolla ({(stats.bnow*0.05).toFixed(2)} zł max)</div>}
-                {+kelly.edge<=0&&<div style={{fontSize:12,color:R}}>⚠️ Ujemna przewaga — matematycznie nie opłaca się grać.</div>}
-              </div>
-            )}
+              );
+            })()}
           </div>
 
           {/* Tape calc */}
@@ -1315,6 +1373,76 @@ export default function App(){
                 </div>
               );
             })}
+          </div>
+
+          {/* ── METRYKI JAKOŚCI ── */}
+          <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"16px",marginBottom:14}}>
+            <div style={{fontSize:14,color:"#444",marginBottom:4}}>🔬 JAKOŚĆ WYNIKÓW</div>
+            <div style={{fontSize:11,color:"#333",marginBottom:12}}>Wyniki historyczne nie gwarantują przyszłych. Wariancja w krótkim terminie jest wysoka.</div>
+
+            {stats.winPnls.length<5?(
+              <div style={{fontSize:13,color:"#333"}}>Potrzeba min. 5 wygranych zakładów do analizy jakości.</div>
+            ):(
+              <>
+                {/* Profit dependency */}
+                <div style={{background:"#060810",borderRadius:8,padding:"12px",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                    <span style={{fontSize:13,color:"#888"}}>📊 Zależność od największej wygranej</span>
+                    <span style={{fontSize:14,fontWeight:600,color:stats.profitDep>70?R:stats.profitDep>40?A:G}}>
+                      {stats.profitDep.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div style={{background:"#0d1117",borderRadius:4,height:8,overflow:"hidden",marginBottom:6}}>
+                    <div style={{width:`${Math.min(100,stats.profitDep)}%`,height:"100%",background:stats.profitDep>70?R:stats.profitDep>40?A:G,borderRadius:4}}/>
+                  </div>
+                  {stats.profitDep>70&&<div style={{fontSize:11,color:R}}>⚠️ {stats.profitDep.toFixed(0)}% zysku pochodzi z {stats.winPnls.length>0?1:0} kuponu — wyniki silnie zależne od jednej wygranej</div>}
+                  {stats.profitDep<=40&&stats.profitDep>0&&<div style={{fontSize:11,color:G}}>✓ Zysk rozłożony na wiele kuponów — dobry znak</div>}
+                </div>
+
+                {/* Concentration */}
+                <div style={{background:"#060810",borderRadius:8,padding:"12px",marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={{fontSize:13,color:"#888"}}>🎯 Koncentracja (top 3 wygranych)</span>
+                    <span style={{fontSize:14,fontWeight:600,color:stats.concentration>80?R:stats.concentration>50?A:G}}>
+                      {stats.concentration.toFixed(0)}%
+                    </span>
+                  </div>
+                  <div style={{fontSize:11,color:"#555"}}>
+                    {stats.concentration>80
+                      ? `⚠️ Top 3 kupony generują ${stats.concentration.toFixed(0)}% całego zysku`
+                      : `Top 3 kupony: ${stats.concentration.toFixed(0)}% zysku`}
+                  </div>
+                </div>
+
+                {/* Median win vs loss */}
+                <div style={{background:"#060810",borderRadius:8,padding:"12px",marginBottom:10}}>
+                  <div style={{fontSize:13,color:"#888",marginBottom:8}}>📐 Mediana wygranych vs przegranych</div>
+                  <div style={{display:"flex",gap:12}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:11,color:"#444",marginBottom:3}}>Wygrana</div>
+                      <div style={{fontSize:18,fontWeight:600,color:G}}>+{stats.medWin.toFixed(0)} zł</div>
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:11,color:"#444",marginBottom:3}}>Przegrana</div>
+                      <div style={{fontSize:18,fontWeight:600,color:R}}>{stats.medLoss.toFixed(0)} zł</div>
+                    </div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:11,color:"#444",marginBottom:3}}>Stosunek</div>
+                      <div style={{fontSize:18,fontWeight:600,color:stats.medLoss<0&&stats.medWin/Math.abs(stats.medLoss)>1?G:R}}>
+                        {stats.medLoss<0?(stats.medWin/Math.abs(stats.medLoss)).toFixed(1):"—"}×
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Disclaimer */}
+                <div style={{background:"rgba(90,159,255,.06)",border:"1px solid rgba(90,159,255,.2)",borderRadius:8,padding:"11px 14px"}}>
+                  <div style={{fontSize:11,color:"#5a9fff",lineHeight:1.7}}>
+                    <b>ℹ️ Zastrzeżenie:</b> Wyniki historyczne nie gwarantują przyszłych wyników. Bukmacherstwo wiąże się z wysoką wariancją — nawet dodatnie EV może generować straty przez wiele tygodni. Profesjonalni gracze operują zwykle na edge 1–5%.
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </>}
 
@@ -1641,6 +1769,8 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onCashout,onEdit
   // EV
   const prob=c.probability!=null?c.probability/100:impliedProb(c.odds);
   const ev=calcEV(c.odds,prob);
+  const edge=calcEdge(c.odds,prob);
+  const el=edgeLabel(edge);
 
   return(
     <div className={isPending?"pc":""} style={{background:sbg,border:`${isPending?"2px":"1px"} solid ${sbd}`,borderRadius:10,marginBottom:8,overflow:"hidden",width:"100%"}}>
@@ -1667,11 +1797,11 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onCashout,onEdit
       </div>
       {expanded&&<>
         {/* EV details */}
-        <div style={{padding:"8px 14px",borderTop:"1px solid rgba(0,0,0,.3)",display:"flex",gap:16,fontSize:13,color:"#444",flexWrap:"wrap"}}>
+        <div style={{padding:"8px 14px",borderTop:"1px solid rgba(0,0,0,.3)",display:"flex",gap:12,fontSize:12,color:"#444",flexWrap:"wrap",alignItems:"center"}}>
           <span>EV: <b style={{color:evColor(ev,A,G,"#dc3232")}}>{ev>=0?"+":""}{ev.toFixed(3)}</b></span>
-          <span>Edge: <b style={{color:evColor(ev,A,G,"#dc3232")}}>{calcEdge(c.odds,prob)>=0?"+":""}{calcEdge(c.odds,prob).toFixed(1)}%</b></span>
-          <span>Prob: <b style={{color:"#d4d8e8"}}>{(prob*100).toFixed(2)}%</b></span>
-          {c.probability==null&&<span style={{color:"#333"}}>implied (brak własnej)</span>}
+          <span>Edge: <b style={{color:el.color}}>{edge>=0?"+":""}{edge.toFixed(1)}%</b></span>
+          <span style={{color:el.color,fontWeight:600,fontSize:11}}>{el.label}</span>
+          <span style={{color:"#333",fontSize:11}}>Prob: {(prob*100).toFixed(2)}%{c.probability==null?" (implied)":""}</span>
         </div>
         {c.legs.length>0&&c.legs.map((l,i)=>(
           <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"9px 14px",borderTop:"1px solid rgba(0,0,0,.3)"}}>
