@@ -887,7 +887,7 @@ export default function App(){
               </div>
               <button className="tap" onClick={()=>setShowFilter(s=>!s)}
                 style={{background:showFilter||filterBk||filterEV||filterSt?"rgba(240,165,0,.15)":"#0d1117",border:`1px solid ${showFilter||filterBk||filterEV||filterSt?A:"#1e2535"}`,color:showFilter||filterBk||filterEV||filterSt?A:"#666",borderRadius:8,padding:"9px 14px",fontSize:14,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
-                ⚙ Filtr{(filterBk||filterEV||filterSt)?` (${[filterBk,filterEV,filterSt].filter(Boolean).length})":""}
+                ⚙ Filtr{(filterBk||filterEV||filterSt)?` (${[filterBk,filterEV,filterSt].filter(Boolean).length})`:""}
               </button>
               {(histSearch||filterBk||filterEV||filterSt)&&(
                 <button className="tap" onClick={()=>{setHistSearch("");setFilterBk("");setFilterEV("");setFilterSt("");}}
