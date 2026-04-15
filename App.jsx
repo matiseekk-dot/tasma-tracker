@@ -18,6 +18,10 @@ const ls    = {
   get:(k,fb)=>{ try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb;}catch{return fb;} },
   set:(k,v)=>{ try{localStorage.setItem(k,JSON.stringify(v));}catch{} },
 };
+// Unit display helper
+const toU = (stake, unitSize) => unitSize>0 ? `${(stake/unitSize).toFixed(1)}u` : null;
+const dispStake = (stake, unitSize, cur="zł") => unitSize>0 ? `${(stake/unitSize).toFixed(1)}u` : `${stake} ${cur}`;
+
 const grpByDate = (arr) => {
   const g={};
   [...arr].sort((a,b)=>b.date.localeCompare(a.date)).forEach(c=>{
@@ -56,7 +60,61 @@ const evColor     = (ev,A,G,R) => ev>0.02?G:ev>-0.02?A:R;
 // ─── Odds range helper ───────────────────────────────────────────────────────
 const oddsRange = (odds) => odds<2?"<2.0":odds<=5?"2.0–5.0":">5.0";
 
+// ─── Rolling average ────────────────────────────────────────────────────────
+const rollingAvg = (pts, window=7) => pts.map((_, i) => {
+  const start=Math.max(0,i-window+1);
+  const slice=pts.slice(start,i+1);
+  return slice.reduce((s,v)=>s+v,0)/slice.length;
+});
+
 // ─── Export / Import ─────────────────────────────────────────────────────────
+const pdfExport = (coupons, stats, settings, bankroll) => {
+  const taxRate=settings.taxRate||0;
+  const cur="zł";
+  const settled=coupons.filter(c=>["won","lost","cashout"].includes(c.status));
+  const monthly={};
+  settled.forEach(c=>{
+    const mo=c.date.slice(0,7);
+    if(!monthly[mo])monthly[mo]={stk:0,p:0,w:0,t:0};
+    monthly[mo].stk+=c.stake;monthly[mo].p+=calcPnl(c,taxRate);monthly[mo].t++;
+    if(c.status==="won")monthly[mo].w++;
+  });
+  const rows=Object.entries(monthly).sort().map(([mo,d])=>`
+    <tr><td>${mo}</td><td>${d.t}</td><td>${d.w}/${d.t}</td>
+    <td>${d.stk>0?((d.w/d.t)*100).toFixed(0):0}%</td>
+    <td>${d.stk>0?((d.p/d.stk)*100).toFixed(1):0}%</td>
+    <td style="color:${d.p>=0?"#00a844":"#cc2222"};font-weight:600">${d.p>=0?"+":""}${d.p.toFixed(2)} ${cur}</td></tr>`).join("");
+  const html=`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Taśma Tracker — Raport</title>
+  <style>body{font-family:monospace;padding:32px;color:#111;max-width:800px;margin:0 auto}
+  h1{font-size:20px;margin-bottom:4px}h2{font-size:14px;color:#555;margin:24px 0 8px;text-transform:uppercase;letter-spacing:.08em}
+  .kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+  .kpi div{border:1px solid #ddd;border-radius:8px;padding:12px;text-align:center}
+  .kpi .lbl{font-size:11px;color:#888;margin-bottom:4px}
+  .kpi .val{font-size:20px;font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{background:#f5f5f5;padding:8px;text-align:left;border-bottom:2px solid #ddd}
+  td{padding:7px 8px;border-bottom:1px solid #eee}
+  @media print{button{display:none}}</style></head><body>
+  <h1>📊 Taśma Tracker — Raport miesięczny</h1>
+  <div style="font-size:12px;color:#888">Wygenerowano: ${new Date().toLocaleDateString("pl-PL")} · Bankroll startowy: ${bankroll} ${cur}</div>
+  <div class="kpi">
+    <div><div class="lbl">Bankroll</div><div class="val" style="color:${stats.bnow>=bankroll?"#00a844":"#cc2222"}">${stats.bnow.toFixed(0)} ${cur}</div></div>
+    <div><div class="lbl">Łączny P&L</div><div class="val" style="color:${stats.totalPnl>=0?"#00a844":"#cc2222"}">${stats.totalPnl>=0?"+":""}${stats.totalPnl.toFixed(0)} ${cur}</div></div>
+    <div><div class="lbl">Win Rate</div><div class="val">${stats.winRate.toFixed(1)}%</div></div>
+    <div><div class="lbl">ROI</div><div class="val" style="color:${stats.roi>=0?"#00a844":"#cc2222"}">${stats.roi>=0?"+":""}${stats.roi.toFixed(1)}%</div></div>
+  </div>
+  <h2>Miesiąc po miesiącu</h2>
+  <table><thead><tr><th>Miesiąc</th><th>Kupony</th><th>W/P</th><th>Win Rate</th><th>ROI</th><th>P&L</th></tr></thead>
+  <tbody>${rows}</tbody></table>
+  <h2>Ostatnie kupony</h2>
+  <table><thead><tr><th>Data</th><th>Buk</th><th>Kurs</th><th>Stawka</th><th>Status</th><th>P&L</th></tr></thead>
+  <tbody>${[...coupons].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,50).map(c=>`
+    <tr><td>${c.date}</td><td>${c.bk}</td><td>×${c.odds.toFixed(2)}</td><td>${c.stake} ${cur}</td>
+    <td>${c.status}</td><td style="color:${calcPnl(c,taxRate)>=0?"#00a844":"#cc2222"}">${calcPnl(c,taxRate)>=0?"+":""}${calcPnl(c,taxRate).toFixed(2)} ${cur}</td></tr>`).join("")}</tbody></table>
+  <script>window.print()</script></body></html>`;
+  const w=window.open("","_blank");w.document.write(html);w.document.close();
+};
+
 const jsonExport = (data) => {
   const blob=new Blob([JSON.stringify({version:3,exportDate:new Date().toISOString(),...data},null,2)],{type:"application/json"});
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);
@@ -156,7 +214,7 @@ const getBreakdownGroups = (coupons, taxRate=0) => {
 export default function App(){
   const [coupons,     setCoupons]     = useState(()=>ls.get(SK,SEED));
   const [bankroll,    setBankroll]    = useState(()=>ls.get(BK,500));
-  const [settings,    setSettings]    = useState(()=>ls.get(SK2,{goalBankroll:2000,dayLoss:50,weekLoss:150,taxRate:0,alertsEnabled:true,stopAfter:20}));
+  const [settings,    setSettings]    = useState(()=>ls.get(SK2,{goalBankroll:2000,dayLoss:50,weekLoss:150,taxRate:0,alertsEnabled:true,stopAfter:20,unitSize:0,dayProfitGoal:0}));
   const [withdrawals, setWithdrawals] = useState(()=>ls.get(SK3,[]));
   const [templates,   setTemplates]   = useState(()=>ls.get(SK4,[]));
 
@@ -178,6 +236,14 @@ export default function App(){
   const [wdForm,     setWdForm]     = useState({date:todayISO(),amount:"",note:""});
   const [showTpl,    setShowTpl]    = useState(false);
   const [tplForm,    setTplForm]    = useState({name:"",bk:"Superbet",stake:"15",odds:""});
+  // Search & filter
+  const [histSearch, setHistSearch] = useState("");
+  const [filterBk,   setFilterBk]   = useState("");
+  const [filterEV,   setFilterEV]   = useState("");
+  const [filterSt,   setFilterSt]   = useState("");
+  const [showFilter, setShowFilter] = useState(false);
+  // Stats time range
+  const [statsRange, setStatsRange] = useState("all");
 
   const firstRender = useRef(true);
   const importRef   = useRef(null);
@@ -190,7 +256,7 @@ export default function App(){
   useEffect(()=>{ls.set(SK4,templates);},[templates]);
 
   const blank={date:todayISO(),bk:"Superbet",stake:"15",odds:"",legs:[],note:"",status:"pending",
-    isFreebet:false,freebetSR:false,cashoutAmount:"",probability:null,evManual:false};
+    isFreebet:false,freebetSR:false,cashoutAmount:"",probability:null,evManual:false,oddsHistory:[]};
   const [form,setForm]=useState(blank);
   const [legM,setLegM]=useState(""),legS_ref=useRef("");
   const [legS,setLegS]=useState("");
@@ -202,8 +268,17 @@ export default function App(){
   const saveForm = ()=>{
     if(!form.odds||!form.stake)return;
     const obj={...form,stake:+form.stake,odds:+form.odds,probability:form.probability!==""&&form.probability!=null?+form.probability:null};
-    if(editId){setCoupons(p=>p.map(c=>c.id===editId?{...obj,id:editId}:c));setEditId(null);}
-    else{setCoupons(p=>[...p,{...obj,id:Date.now()}]);}
+    if(editId){
+      const prev=coupons.find(x=>x.id===editId);
+      const prevOdds=prev?.odds;
+      const newOdds=+form.odds;
+      let hist=[...(prev?.oddsHistory||[])];
+      if(prevOdds&&prevOdds!==newOdds) hist=[...hist,{date:todayISO(),odds:prevOdds}];
+      setCoupons(p=>p.map(x=>x.id===editId?{...obj,id:editId,oddsHistory:hist}:x));
+      setEditId(null);
+    } else {
+      setCoupons(p=>[...p,{...obj,id:Date.now(),oddsHistory:[]}]);
+    }
     setForm(blank);setLegM("");setLegS("");setShowAdd(false);
   };
   const addLeg=()=>{if(!legM.trim())return;setForm(f=>({...f,legs:[...f.legs,{m:legM.trim(),s:legS.trim()}]}));setLegM("");setLegS("");setTimeout(()=>legRef.current?.focus(),0);};
@@ -216,8 +291,12 @@ export default function App(){
   // ── Full stats ───────────────────────────────────────────────────────────────
   const stats = useMemo(()=>{
     const taxRate=settings.taxRate||0;
-    const settled=coupons.filter(c=>["won","lost","cashout"].includes(c.status));
-    const wonList=coupons.filter(c=>c.status==="won");
+    // Time range filter
+    const rangeDays={"7d":7,"30d":30,"90d":90}[statsRange]||null;
+    const cutoff=rangeDays?new Date(Date.now()-rangeDays*86400000):null;
+    const inRange=c=>!cutoff||new Date(c.date)>=cutoff;
+    const settled=coupons.filter(c=>["won","lost","cashout"].includes(c.status)&&inRange(c));
+    const wonList=coupons.filter(c=>c.status==="won"&&inRange(c));
     const staked=settled.reduce((s,c)=>s+c.stake,0);
     const totalPnl=settled.reduce((s,c)=>s+calcPnl(c,taxRate),0);
     const roi=staked>0?(totalPnl/staked)*100:0;
@@ -312,7 +391,7 @@ export default function App(){
       total:coupons.length,winRate:settled.length>0?(wonList.length/settled.length)*100:0,
       todayPnl,weekPnl,streak,maxWS,maxLS,maxAD,maxWin,maxOdds,
       legsBuckets,dow,monthly,brHistory,streakHistory,valueCount,segWR,avgLS};
-  },[coupons,bankroll,withdrawals,settings]);
+  },[coupons,bankroll,withdrawals,settings,statsRange]);
 
   // ── Kelly calculation ─────────────────────────────────────────────────────
   const kelly = useMemo(()=>{
@@ -342,6 +421,28 @@ export default function App(){
     if(settings.stopAfter&&ls>=settings.stopAfter)alerts.push({level:"critical",msg:`🛑 Limit serii osiągnięty (${settings.stopAfter})`,rec:"Automatyczne zatrzymanie aktywne."});
     return alerts;
   },[stats.streak,settings]);
+
+  // ── Non-streak alerts ────────────────────────────────────────────────────
+  const extraAlerts = useMemo(()=>{
+    const a=[];
+    if(stats.todayPnl<=-settings.dayLoss)
+      a.push({level:"danger",msg:`⚠️ Dzienny limit straty (${settings.dayLoss} zł) przekroczony! Dziś: ${stats.todayPnl.toFixed(0)} zł`});
+    else if(stats.todayPnl<=-settings.dayLoss*0.8)
+      a.push({level:"warn",msg:`⚠️ Blisko dziennego limitu (${settings.dayLoss} zł). Dziś: ${stats.todayPnl.toFixed(0)} zł`});
+    if(stats.weekPnl<=-settings.weekLoss)
+      a.push({level:"danger",msg:`⚠️ Tygodniowy limit straty (${settings.weekLoss} zł) przekroczony!`});
+    // Overdue pending
+    const overdue=coupons.filter(c=>c.status==="pending"&&c.date<todayISO());
+    if(overdue.length>0)
+      a.push({level:"warn",msg:`⏰ ${overdue.length} nierozliczony/ch kupon/ów z poprzednich dni`,sub:"Otwórz Kalendarz → kliknij dzień aby rozliczyć"});
+    // Daily profit goal hit
+    if((settings.dayProfitGoal||0)>0&&stats.todayPnl>=(settings.dayProfitGoal||0))
+      a.push({level:"profit",msg:`🎯 Dzienny cel zysku osiągnięty! Dziś: +${stats.todayPnl.toFixed(0)} zł`,sub:"Gratulacje! Rozważ zakończenie gry na dziś."});
+    // No slip today
+    if(!coupons.some(c=>c.date===todayISO()))
+      a.push({level:"info",msg:"🔔 Brak kuponu na dziś!"});
+    return a;
+  },[stats,settings,coupons]);
 
   // ── Breakdown ─────────────────────────────────────────────────────────────
   const breakdown = useMemo(()=>{
@@ -402,7 +503,21 @@ export default function App(){
   },[heatYear,coupons,settings]);
 
   const todayList=useMemo(()=>coupons.filter(c=>c.date===todayISO()).sort((a,b)=>b.id-a.id),[coupons]);
-  const histGrp=useMemo(()=>grpByDate(coupons.filter(c=>c.date!==todayISO())),[coupons]);
+  const histGrp=useMemo(()=>{
+    const unitSize=settings.unitSize||0;
+    let cs=coupons.filter(c=>c.date!==todayISO());
+    if(histSearch){
+      const q=histSearch.toLowerCase();
+      cs=cs.filter(c=>c.note.toLowerCase().includes(q)||c.bk.toLowerCase().includes(q)||c.date.includes(q));
+    }
+    if(filterBk) cs=cs.filter(c=>c.bk===filterBk);
+    if(filterSt) cs=cs.filter(c=>c.status===filterSt);
+    if(filterEV) cs=cs.filter(c=>{
+      const prob=c.probability!=null?c.probability/100:impliedProb(c.odds);
+      return evStatus(calcEV(c.odds,prob))===filterEV;
+    });
+    return grpByDate(cs);
+  },[coupons,histSearch,filterBk,filterSt,filterEV,settings]);
   const goalPct=settings.goalBankroll>bankroll?Math.min(100,Math.max(0,((stats.bnow-bankroll)/(settings.goalBankroll-bankroll))*100)):100;
   const calcOdds=calcLegs&&calcAvg?Math.pow(+calcAvg,+calcLegs).toFixed(2):null;
   const autoStake=Math.min(kelly?.stake||Math.max(5,stats.bnow*0.01),stats.bnow*0.05).toFixed(0);
@@ -433,10 +548,13 @@ export default function App(){
   const DayGroup=({date,cs})=>{
     const dp=cs.filter(c=>c.status!=="pending").reduce((s,c)=>s+calcPnl(c,settings.taxRate||0),0);
     const hp=cs.some(c=>c.status==="pending");
+    const stk=cs.reduce((s,c)=>s+c.stake,0);
+    const us=settings.unitSize||0;
+    const stkLabel=us>0?`${(stk/us).toFixed(1)}u`:`${stk} zł`;
     return(
       <div>
         <div style={{fontSize:14,color:"#444",margin:"18px 0 8px",display:"flex",justifyContent:"space-between"}}>
-          <span>{date} · {cs.length} kup. · {cs.reduce((s,c)=>s+c.stake,0)} zł</span>
+          <span>{date} · {cs.length} kup. · {stkLabel}</span>
           {!hp&&<span style={{color:dp>=0?G:R,fontWeight:600}}>{fmt(dp)}</span>}
         </div>
         <Cards cs={cs}/>
@@ -493,6 +611,18 @@ export default function App(){
             <div style={{fontSize:13,color:"#888"}}>{al.rec}</div>
           </div>
         ))}
+
+        {/* ── EXTRA ALERTS (overdue, limits, profit goal) ── */}
+        {extraAlerts.map((al,i)=>{
+          const clr=al.level==="danger"?R:al.level==="profit"?"#00c8ff":al.level==="warn"?A:"#5a9fff";
+          const bg=al.level==="danger"?"rgba(220,50,50,.1)":al.level==="profit"?"rgba(0,200,255,.08)":al.level==="warn"?"rgba(240,165,0,.09)":"rgba(0,150,255,.08)";
+          return(
+            <div key={i} style={{background:bg,border:`1px solid ${clr}40`,borderRadius:9,padding:"10px 14px",marginBottom:8}}>
+              <div style={{fontSize:14,fontWeight:600,color:clr}}>{al.msg}</div>
+              {al.sub&&<div style={{fontSize:12,color:"#555",marginTop:3}}>{al.sub}</div>}
+            </div>
+          );
+        })}
 
         {/* ── GOAL BAR ── */}
         {settings.goalBankroll>bankroll&&(
@@ -710,7 +840,61 @@ export default function App(){
           </div>
           {todayList.length===0&&<div style={{textAlign:"center",color:"#333",padding:"32px 0",fontSize:16}}>Brak kuponu na dziś.<br/><span style={{color:A,cursor:"pointer"}} onClick={openAdd}>+ KUPON</span></div>}
           <Cards cs={todayList}/>
-          {Object.entries(histGrp).slice(0,5).map(([date,cs])=><DayGroup key={date} date={date} cs={cs}/>)}
+          {/* Search & Filter bar */}
+          <div style={{marginBottom:10}}>
+            <div style={{display:"flex",gap:8,marginBottom:showFilter?8:0}}>
+              <div style={{flex:1,position:"relative"}}>
+                <input placeholder="🔍 Szukaj: data, buk, notatka…" value={histSearch}
+                  onChange={e=>setHistSearch(e.target.value)}
+                  style={{background:"#0d1117",border:"1px solid #1e2535",borderRadius:8,padding:"9px 12px 9px 12px",color:"#d4d8e8",fontFamily:"inherit",fontSize:14,outline:"none",width:"100%"}}/>
+              </div>
+              <button className="tap" onClick={()=>setShowFilter(s=>!s)}
+                style={{background:showFilter||filterBk||filterEV||filterSt?"rgba(240,165,0,.15)":"#0d1117",border:`1px solid ${showFilter||filterBk||filterEV||filterSt?A:"#1e2535"}`,color:showFilter||filterBk||filterEV||filterSt?A:"#666",borderRadius:8,padding:"9px 14px",fontSize:14,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
+                ⚙ Filtr{(filterBk||filterEV||filterSt)?` (${[filterBk,filterEV,filterSt].filter(Boolean).length})":""}
+              </button>
+              {(histSearch||filterBk||filterEV||filterSt)&&(
+                <button className="tap" onClick={()=>{setHistSearch("");setFilterBk("");setFilterEV("");setFilterSt("");}}
+                  style={{background:"none",border:"1px solid #1e2535",color:"#666",borderRadius:8,padding:"9px 12px",fontSize:13,cursor:"pointer"}}>✕</button>
+              )}
+            </div>
+            {showFilter&&(
+              <div className="fd" style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:9,padding:"12px",display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:11,color:"#555",marginBottom:4}}>BUKMACHER</div>
+                  <select value={filterBk} onChange={e=>setFilterBk(e.target.value)}
+                    style={{background:"#060810",border:"1px solid #1e2535",borderRadius:6,padding:"6px 10px",color:"#d4d8e8",fontFamily:"inherit",fontSize:13,outline:"none"}}>
+                    <option value="">Wszyscy</option>
+                    {BKM.map(b=><option key={b}>{b}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:11,color:"#555",marginBottom:4}}>STATUS</div>
+                  <select value={filterSt} onChange={e=>setFilterSt(e.target.value)}
+                    style={{background:"#060810",border:"1px solid #1e2535",borderRadius:6,padding:"6px 10px",color:"#d4d8e8",fontFamily:"inherit",fontSize:13,outline:"none"}}>
+                    <option value="">Wszystkie</option>
+                    <option value="won">✅ Wygrane</option>
+                    <option value="lost">❌ Przegrane</option>
+                    <option value="pending">⏳ Oczekujące</option>
+                    <option value="cashout">💰 Cashout</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:11,color:"#555",marginBottom:4}}>EV</div>
+                  <select value={filterEV} onChange={e=>setFilterEV(e.target.value)}
+                    style={{background:"#060810",border:"1px solid #1e2535",borderRadius:6,padding:"6px 10px",color:"#d4d8e8",fontFamily:"inherit",fontSize:13,outline:"none"}}>
+                    <option value="">Wszystkie</option>
+                    <option value="value">✅ Value</option>
+                    <option value="neutral">⚠️ Neutral</option>
+                    <option value="bad">❌ Bad</option>
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+          {Object.keys(histGrp).length===0&&(histSearch||filterBk||filterEV||filterSt)&&(
+            <div style={{textAlign:"center",color:"#333",padding:"24px",fontSize:14}}>Brak wyników dla tych filtrów</div>
+          )}
+          {Object.entries(histGrp).map(([date,cs])=><DayGroup key={date} date={date} cs={cs}/>)}
         </>}
 
         {/* ── KALENDARZ ── */}
@@ -798,20 +982,38 @@ export default function App(){
             {kpiBox(`${stats.staked.toFixed(0)} zł`,"Łącznie postawione","#888")}
           </div>
 
+          {/* Time range selector */}
+          <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+            {[["all","Wszystko"],["90d","90 dni"],["30d","30 dni"],["7d","7 dni"]].map(([r,l])=>(
+              <button key={r} className="tap" onClick={()=>setStatsRange(r)}
+                style={{background:statsRange===r?"rgba(240,165,0,.15)":"#0d1117",border:`1px solid ${statsRange===r?A:"#1a2030"}`,color:statsRange===r?A:"#555",borderRadius:7,padding:"6px 14px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
+                {l}
+              </button>
+            ))}
+            {statsRange!=="all"&&<span style={{fontSize:11,color:"#333",alignSelf:"center"}}>· statystyki przefiltrowane</span>}
+          </div>
+
           {/* Bankroll chart */}
           {stats.brHistory.length>2&&(()=>{
             const pts=stats.brHistory;const vals=pts.map(p=>p.v);
             const mn=Math.min(...vals),mx=Math.max(...vals),rng=mx-mn||1;
             const H=120,W=pts.length;
             const py=v=>H-((v-mn)/rng)*(H-18)-9;
+            const avgVals=rollingAvg(pts.map(p=>p.v),7);
             return(
               <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"16px",marginBottom:14}}>
-                <div style={{fontSize:14,color:"#444",marginBottom:3}}>📉 BANKROLL vs SERIA PRZEGRANYCH</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:3}}>
+                  <div style={{fontSize:14,color:"#444"}}>📉 BANKROLL vs SERIA PRZEGRANYCH</div>
+                  <div style={{display:"flex",gap:10,fontSize:11,color:"#555",alignItems:"center"}}>
+                    <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{display:"inline-block",width:12,height:2,background:"rgba(255,200,0,.6)",borderRadius:1}}/> śr. 7-dniowa</span>
+                  </div>
+                </div>
                 <div style={{fontSize:11,color:"#333",marginBottom:10}}>Ciemniejsze tło = dłuższa seria przegranych</div>
                 <svg width="100%" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{height:120,display:"block"}}>
                   {pts.map((p,i)=>p.st<0?<rect key={i} x={i} y={0} width={1} height={H} fill={`rgba(220,50,50,${Math.min(.4,.04*Math.abs(p.st))})`}/>:null)}
                   <line x1="0" y1={py(bankroll)} x2={W} y2={py(bankroll)} stroke="#1a2030" strokeWidth=".5" strokeDasharray="3,3" vectorEffect="non-scaling-stroke"/>
                   {pts.map((p,i)=>i===0?null:<line key={i} x1={i-1} y1={py(pts[i-1].v)} x2={i} y2={py(p.v)} stroke={p.v>=bankroll?G:R} strokeWidth="1.5" vectorEffect="non-scaling-stroke"/>)}
+                  {avgVals.map((v,i)=>i===0?null:<line key={`a${i}`} x1={i-1} y1={py(avgVals[i-1])} x2={i} y2={py(v)} stroke="rgba(255,200,0,.55)" strokeWidth="1" vectorEffect="non-scaling-stroke"/>)}
                 </svg>
                 <div style={{display:"flex",justifyContent:"space-between",fontSize:13,color:"#444",marginTop:8}}>
                   <span>Start: {bankroll} zł</span>
@@ -847,25 +1049,71 @@ export default function App(){
             );
           })()}
 
-          {/* Monthly */}
+          {/* Monthly comparison */}
           {Object.keys(stats.monthly).length>0&&(()=>{
             const months=Object.entries(stats.monthly).sort((a,b)=>a[0].localeCompare(b[0]));
             const maxA=Math.max(...months.map(([,d])=>Math.abs(d.p)),1);
+            // Month-over-month comparison
+            const prevMo=(mo)=>{
+              const [y,m]=mo.split("-").map(Number);
+              const pd=new Date(y,m-2,1);
+              return `${pd.getFullYear()}-${String(pd.getMonth()+1).padStart(2,"0")}`;
+            };
+            const moMap=Object.fromEntries(months);
+            const curMoKey=todayISO().slice(0,7);
+            // Best/worst month
+            const bestMo=months.reduce((b,e)=>e[1].p>b[1].p?e:b,months[0]);
+            const worstMo=months.reduce((b,e)=>e[1].p<b[1].p?e:b,months[0]);
             return(
               <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"16px",marginBottom:14}}>
                 <div style={{fontSize:14,color:"#444",marginBottom:12}}>⚖️ PORÓWNANIE MIESIĘCY</div>
-                {months.map(([mo,d])=>(
-                  <div key={mo} style={{marginBottom:10}}>
-                    <div style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4,gap:4,flexWrap:"wrap"}}>
-                      <span style={{color:"#888"}}>{mo}</span>
-                      <span style={{color:"#555",fontSize:12}}>{d.t} kup. · {d.w}W/{d.t-d.w}P · {d.stk.toFixed(0)} zł</span>
-                      <span style={{color:d.p>=0?G:R,fontWeight:600}}>{fmt(d.p)}</span>
+                {months.map(([mo,d])=>{
+                  const prev=moMap[prevMo(mo)];
+                  const roiDiff=prev&&prev.stk>0&&d.stk>0?((d.p/d.stk)-(prev.p/prev.stk))*100:null;
+                  const pnlDiff=prev?d.p-prev.p:null;
+                  const isBest=mo===bestMo[0]&&months.length>1;
+                  const isWorst=mo===worstMo[0]&&months.length>1;
+                  const isCurrent=mo===curMoKey;
+                  return(
+                    <div key={mo} style={{marginBottom:12,padding:"10px 12px",background:"#060810",borderRadius:8,border:`1px solid ${isBest?"#0d3018":isWorst?"#2a1010":"#1a2030"}`}}>
+                      {/* Header row */}
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6,flexWrap:"wrap",gap:4}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          <span style={{fontSize:14,color:"#d4d8e8",fontWeight:500}}>{mo}</span>
+                          {isCurrent&&<span style={{background:"rgba(240,165,0,.15)",color:A,borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:700}}>TERAZ</span>}
+                          {isBest&&<span style={{background:"rgba(0,200,80,.15)",color:G,borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:700}}>🏆 NAJLEPSZY</span>}
+                          {isWorst&&<span style={{background:"rgba(220,50,50,.15)",color:R,borderRadius:4,padding:"1px 6px",fontSize:10,fontWeight:700}}>📉 NAJGORSZY</span>}
+                        </div>
+                        <span style={{color:d.p>=0?G:R,fontWeight:700,fontSize:15}}>{fmt(d.p)}</span>
+                      </div>
+                      {/* Stats row */}
+                      <div style={{display:"flex",gap:12,fontSize:12,color:"#555",marginBottom:6,flexWrap:"wrap"}}>
+                        <span>{d.t} kup.</span>
+                        <span>{d.stk>0?((d.w/d.t)*100).toFixed(0):0}% WR</span>
+                        <span>ROI {d.stk>0?((d.p/d.stk)*100).toFixed(1):0}%</span>
+                        <span>{d.stk.toFixed(0)} zł postawione</span>
+                      </div>
+                      {/* Month-over-month delta */}
+                      {prev&&roiDiff!==null&&(
+                        <div style={{display:"flex",gap:10,fontSize:12,flexWrap:"wrap"}}>
+                          <span style={{color:"#444"}}>vs {prevMo(mo)}:</span>
+                          <span style={{color:roiDiff>0?G:roiDiff<0?R:"#555",fontWeight:600}}>
+                            {roiDiff>0?"▲":"▼"} ROI {roiDiff>0?"+":""}{roiDiff.toFixed(1)} pp
+                          </span>
+                          <span style={{color:pnlDiff>0?G:pnlDiff<0?R:"#555",fontWeight:600}}>
+                            {pnlDiff>=0?"+":""}{pnlDiff.toFixed(0)} zł P&L
+                          </span>
+                          {roiDiff>5&&<span style={{color:G}}>🔥 lepszy miesiąc!</span>}
+                          {roiDiff<-5&&<span style={{color:R}}>📉 gorszy miesiąc</span>}
+                        </div>
+                      )}
+                      {/* Bar */}
+                      <div style={{background:"#0d1117",borderRadius:3,height:6,overflow:"hidden",marginTop:8}}>
+                        <div style={{width:`${(Math.abs(d.p)/maxA)*100}%`,height:"100%",background:d.p>=0?G:R,borderRadius:3}}/>
+                      </div>
                     </div>
-                    <div style={{background:"#060810",borderRadius:4,height:10,overflow:"hidden"}}>
-                      <div style={{width:`${(Math.abs(d.p)/maxA)*100}%`,height:"100%",background:d.p>=0?G:R,borderRadius:4}}/>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })()}
@@ -962,6 +1210,10 @@ export default function App(){
           <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"16px",marginBottom:14}}>
             <div style={{fontSize:14,color:"#444",marginBottom:12}}>📤 EKSPORT / IMPORT</div>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button className="tap" onClick={()=>pdfExport(coupons,stats,settings,bankroll)}
+                style={{flex:1,minWidth:120,background:"rgba(220,50,50,.1)",border:"1px solid rgba(220,50,50,.3)",color:R,borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
+                📄 Eksport PDF
+              </button>
               <button className="tap" onClick={()=>jsonExport({coupons,bankroll,settings,withdrawals,templates})}
                 style={{flex:1,minWidth:130,background:"rgba(0,200,80,.1)",border:"1px solid rgba(0,200,80,.3)",color:G,borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
                 💾 Backup JSON
@@ -1144,6 +1396,34 @@ export default function App(){
             <div style={{fontSize:15,color:"#d4d8e8",marginBottom:3}}>💰 Bankroll startowy (zł)</div>
             <div style={{display:"flex",alignItems:"center",gap:10}}>
               <input type="number" value={bankroll} onChange={e=>setBankroll(+e.target.value)} style={{...smInp(),color:A,width:130,fontSize:18}}/>
+              <span style={{fontSize:15,color:"#666"}}>zł</span>
+            </div>
+          </div>
+
+          {/* Units */}
+          <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px",marginBottom:10}}>
+            <div style={{fontSize:15,color:"#d4d8e8",marginBottom:2}}>🎯 System jednostek</div>
+            <div style={{fontSize:12,color:"#444",marginBottom:10}}>Wartość 1 jednostki (unit) w zł. Stawki będą pokazywane jako "Xu". Ustaw 0 żeby wyłączyć.</div>
+            <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <span style={{fontSize:14,color:"#555"}}>1u =</span>
+                <input type="number" min="0" value={settings.unitSize||0} onChange={e=>setSettings(s=>({...s,unitSize:+e.target.value}))}
+                  style={{...smInp(),color:A,width:100,fontSize:18}}/>
+                <span style={{fontSize:14,color:"#666"}}>zł</span>
+              </div>
+              {(settings.unitSize||0)>0&&(
+                <span style={{fontSize:13,color:"#555"}}>bankroll: <b style={{color:A}}>{(stats.bnow/(settings.unitSize||1)).toFixed(1)}u</b></span>
+              )}
+            </div>
+          </div>
+
+          {/* Daily profit goal */}
+          <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px",marginBottom:10}}>
+            <div style={{fontSize:15,color:"#d4d8e8",marginBottom:2}}>🏆 Dzienny cel zysku</div>
+            <div style={{fontSize:12,color:"#444",marginBottom:10}}>Alert gdy osiągniesz dzienny cel. Ustaw 0 żeby wyłączyć.</div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <input type="number" min="0" value={settings.dayProfitGoal||0} onChange={e=>setSettings(s=>({...s,dayProfitGoal:+e.target.value}))}
+                style={{...smInp(),color:G,width:130,fontSize:18}}/>
               <span style={{fontSize:15,color:"#666"}}>zł</span>
             </div>
           </div>
@@ -1400,6 +1680,18 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onCashout,onEdit
             <span style={{fontSize:15,color:A,fontWeight:600}}>{l.s}</span>
           </div>
         ))}
+        {c.oddsHistory&&c.oddsHistory.length>0&&(
+          <div style={{padding:"7px 14px",borderTop:"1px solid rgba(0,0,0,.3)",display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+            <span style={{fontSize:10,color:"#444",letterSpacing:".06em",flexShrink:0}}>HISTORIA KURSU</span>
+            {c.oddsHistory.map((h,i)=>(
+              <span key={i} style={{fontSize:12,color:"#555"}}>
+                <span style={{color:"#333"}}>{h.date}</span> ×{h.odds.toFixed(2)}
+                <span style={{color:"#222",margin:"0 4px"}}>→</span>
+              </span>
+            ))}
+            <span style={{fontSize:13,color:A,fontWeight:600}}>×{c.odds.toFixed(2)}</span>
+          </div>
+        )}
         <div style={{padding:"9px 14px",borderTop:"1px solid rgba(0,0,0,.3)",display:"flex",gap:20,fontSize:14,color:"#444",flexWrap:"wrap"}}>
           <span>Wygrana: <b style={{color:A}}>{(c.odds*c.stake).toFixed(2)} zł</b></span>
           <span>Zysk: <b style={{color:G}}>+{((c.odds-1)*c.stake).toFixed(2)} zł</b></span>
