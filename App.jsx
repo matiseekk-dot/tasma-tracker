@@ -5,7 +5,7 @@ const BKM    = ["Superbet","Fortuna","STS","Betclic","LVBet","Betfan","Totolotek
 const MONTHS = ["Styczeń","Luty","Marzec","Kwiecień","Maj","Czerwiec","Lipiec","Sierpień","Wrzesień","Październik","Listopad","Grudzień"];
 const DAYS7  = ["Pn","Wt","Śr","Cz","Pt","Sb","Nd"];
 
-const SK="tc2",BK="tb2",SK2="ts2",SK3="tw2",SK4="tt2",SAL="tal2";
+const SK="tc2",BK="tb2",SK2="ts2",SK3="tw2",SK4="tt2",SAL="tal2",SKB="tbk2";
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 const todayISO = () => {
@@ -236,6 +236,56 @@ const getBreakdownGroups = (coupons, taxRate=0) => {
 };
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
+// ── Kelly Result Component ────────────────────────────────────────────────────
+function KellyResult({kelly,kellyMode,stats,A,G,R}){
+  const ls=stats.streak<0?Math.abs(stats.streak):0;
+  const ev=+kelly.edge/100;
+  const edge=+kelly.edge;
+  let lbl,clr,msg;
+  if(ls>=20)                        {lbl="STOP BETTING";  clr="#dc3232";msg="Seria 20+ przegranych. Zatrzymaj się całkowicie.";}
+  else if(ev<0)                     {lbl="NIE GRAJ";      clr="#dc3232";msg="Ujemne EV — matematycznie opłaca się nie grać.";}
+  else if(ls>=10)                   {lbl="OSTROŻNIE";     clr="#f0a500";msg=`Seria ${ls} przegranych. Zmniejsz stawkę o 50%.`;}
+  else if(kelly.sampleN<30&&kelly.usingImplied){lbl="OSTROŻNIE";clr="#f0a500";msg="Za mało danych — użyto implied probability.";}
+  else if(edge<1&&edge>=0)          {lbl="NISKA PRZEWAGA";clr="#f0a500";msg="Edge <1% — niemal brak matematycznej przewagi.";}
+  else if(ls>=5)                    {lbl="OSTROŻNIE";     clr="#f0a500";msg=`Seria ${ls} przegranych. Rozważ zmniejszenie stawki.`;}
+  else if(ev>0&&edge>=3)            {lbl="OK TO BET";     clr="#00c850";msg="Pozytywne EV i wystarczająca przewaga.";}
+  else                              {lbl="OK";            clr="#00c850";msg="Brak sygnałów ostrzegawczych.";}
+  const ec=edge>20?"#ff8c00":edge>10?"#00c850":edge>=3?"#00c850":edge>=0?"#f0a500":"#dc3232";
+  const el=edge>20?"⚠️ Nierealistyczna":edge>10?"Wysoka przewaga":edge>=3?"Umiarkowana":edge>=0?"Niska przewaga":"Brak przewagi";
+  return(
+    <div style={{background:"rgba(240,165,0,.07)",border:"1px solid rgba(240,165,0,.2)",borderRadius:8,padding:"14px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,padding:"10px 12px",background:`${clr}18`,border:`1px solid ${clr}40`,borderRadius:8}}>
+        <div style={{width:10,height:10,borderRadius:"50%",background:clr,flexShrink:0,boxShadow:`0 0 6px ${clr}80`}}/>
+        <div>
+          <div style={{fontSize:14,fontWeight:700,color:clr,letterSpacing:".05em"}}>{lbl}</div>
+          <div style={{fontSize:12,color:"#666",marginTop:2}}>{msg}</div>
+        </div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,fontSize:13,flexWrap:"wrap"}}>
+        <span style={{color:"#555"}}>Interpretacja edge:</span>
+        <span style={{color:ec,fontWeight:600}}>{el}</span>
+        {edge>20&&<span style={{fontSize:11,color:"#ff8c00"}}> · sprawdź dane</span>}
+      </div>
+      {edge>20&&<div style={{background:"rgba(255,140,0,.08)",border:"1px solid rgba(255,140,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#ff8c00"}}>⚠️ Edge &gt;20% jest nierealistycznie wysoki. Profesjonaliści operują na 1–5%.</div>}
+      {kelly.usingImplied&&<div style={{background:"rgba(90,159,255,.08)",border:"1px solid rgba(90,159,255,.2)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#5a9fff"}}>ℹ️ Użyto implied probability — za mało danych historycznych (min. 30 w segmencie)</div>}
+      {!kelly.usingImplied&&kelly.smallSample&&<div style={{background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:A}}>⚠️ Mała próbka ({kelly.sampleN} kuponów) — potrzeba min. 30.</div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+        {[
+          {l:`Kelly (${kellyMode==="full"?"pełny":kellyMode==="half"?"½":"¼"})`,v:`${kelly.adjusted}% bankrolla`,c:A},
+          {l:"Sugerowana stawka",v:`${kelly.stake} zł`,c:G},
+          {l:"Twoja przewaga",v:`${kelly.edge}%`,c:+kelly.edge>0?G:R},
+          {l:"Confidence",v:kelly.confidence==="alta"?"🟢 wysoka":kelly.confidence==="media"?"🟡 średnia":"🔴 niska",c:"#d4d8e8"}
+        ].map(({l,v,c})=>(
+          <div key={l}><div style={{fontSize:11,color:"#444",marginBottom:3}}>{l}</div><div style={{fontSize:15,fontWeight:600,color:c}}>{v}</div></div>
+        ))}
+      </div>
+      {kelly.capped&&<div style={{fontSize:12,color:A,marginBottom:4}}>⚠ Ucięto do 5% bankrolla</div>}
+      {+kelly.edge<=0&&<div style={{fontSize:12,color:R,marginBottom:4}}>⚠️ Ujemna przewaga — nie opłaca się grać.</div>}
+      <div style={{fontSize:11,color:"#333",marginTop:6}}>Hard cap: max 5% bankrolla · Profesjonaliści: 1–5% edge</div>
+    </div>
+  );
+}
+
 export default function App(){
   const [coupons,     setCoupons]     = useState(()=>ls.get(SK,SEED));
   const [bankroll,    setBankroll]    = useState(()=>ls.get(BK,500));
@@ -260,6 +310,7 @@ export default function App(){
   const [showWd,     setShowWd]     = useState(false);
   const [wdForm,     setWdForm]     = useState({date:todayISO(),amount:"",note:""});
   const [showTpl,    setShowTpl]    = useState(false);
+  const [lastBackup, setLastBackup]  = useState(()=>ls.get(SKB,null));
   const [tplForm,    setTplForm]    = useState({name:"",bk:"Superbet",stake:"15",odds:""});
   // Search & filter
   const [histSearch, setHistSearch] = useState("");
@@ -279,6 +330,13 @@ export default function App(){
   useEffect(()=>{ls.set(SK2,settings);},[settings]);
   useEffect(()=>{ls.set(SK3,withdrawals);},[withdrawals]);
   useEffect(()=>{ls.set(SK4,templates);},[templates]);
+  // Auto-backup reminder: save timestamp when user manually exports
+  const doBackup = () => {
+    jsonExport({coupons,bankroll,settings,withdrawals,templates});
+    const now=todayISO();
+    ls.set(SKB,now);
+    setLastBackup(now);
+  };
 
   const blank={date:todayISO(),bk:"Superbet",stake:"15",odds:"",legs:[],note:"",status:"pending",
     isFreebet:false,freebetSR:false,cashoutAmount:"",probability:null,evManual:false,oddsHistory:[]};
@@ -287,6 +345,33 @@ export default function App(){
   const [legS,setLegS]=useState("");
 
   useEffect(()=>{if(showAdd)setTimeout(()=>stakeRef.current?.focus(),60);},[showAdd]);
+
+  // ── Auto-backup co 7 dni ──────────────────────────────────────────────────
+  useEffect(()=>{
+    if(coupons.length===0) return;
+    const last=ls.get(SKB,null);
+    const daysSince=last?Math.floor((Date.now()-new Date(last))/86400000):999;
+    if(daysSince>=7){
+      // Próba automatycznego pobrania
+      try{
+        const data={coupons,bankroll,settings,withdrawals,templates,exportedAt:new Date().toISOString(),autoBackup:true};
+        const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement("a");
+        a.href=url;
+        a.download=`tasma-tracker-auto-${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},300);
+        const now=todayISO();
+        ls.set(SKB,now);
+        setLastBackup(now);
+      }catch(e){
+        console.warn("Auto-backup failed:",e);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
 
   const openAdd  = ()=>{setEditId(null);setForm(blank);setLegM("");setLegS("");setShowAdd(true);};
   const openEdit = (c)=>{setForm({...c,stake:String(c.stake),odds:String(c.odds),probability:c.probability!=null?String(c.probability):""});setEditId(c.id);setShowAdd(true);};
@@ -660,6 +745,30 @@ export default function App(){
             </div>
           );
         })}
+
+        {/* ── BACKUP ALERT ── */}
+        {(()=>{
+          if(!coupons.length) return null;
+          const daysSince=lastBackup?Math.floor((Date.now()-new Date(lastBackup))/86400000):999;
+          if(daysSince<7) return null;
+          return(
+            <div style={{background:"rgba(220,50,50,.1)",border:"1px solid rgba(220,50,50,.4)",borderRadius:10,padding:"12px 16px",marginBottom:12,display:"flex",alignItems:"center",gap:12}}>
+              <span style={{fontSize:22,flexShrink:0}}>⚠️</span>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:600,color:"#dc3232",marginBottom:2}}>
+                  {lastBackup?`Backup: ${daysSince} dni temu`:"Brak backupu!"}
+                </div>
+                <div style={{fontSize:12,color:"#888"}}>
+                  {lastBackup?"Usuniecie PWA = utrata wszystkich danych. Zrób backup teraz.":"Nigdy nie zrobiłeś kopii. Usuniecie apki = utrata wszystkich danych."}
+                </div>
+              </div>
+              <button className="tap" onClick={doBackup}
+                style={{background:"rgba(220,50,50,.2)",border:"1px solid rgba(220,50,50,.5)",color:"#ff6b6b",borderRadius:8,padding:"9px 14px",fontSize:13,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}}>
+                💾 Backup
+              </button>
+            </div>
+          );
+        })()}
 
         {/* ── GOAL BAR ── */}
         {settings.goalBankroll>bankroll&&(
@@ -1211,38 +1320,7 @@ export default function App(){
                 <input type="number" placeholder={`auto: ${(stats.segWR[kSegment]?.wr||stats.winRate).toFixed(1)}%`} value={kWinP} onChange={e=>setKWinP(e.target.value)} style={inp({fontSize:16})}/>
               </div>
             </div>
-            {kelly&&(()=>{
-              const dec=calcDecision({ev:+kelly.edge/100,edge:+kelly.edge,streak:stats.streak,kellyPct:+kelly.adjusted,bankroll:stats.bnow,segN:kelly.sampleN,usingImplied:kelly.usingImplied});
-              const el=edgeLabel(+kelly.edge);
-              return(
-                <div style={{background:"rgba(240,165,0,.07)",border:"1px solid rgba(240,165,0,.2)",borderRadius:8,padding:"14px"}}>
-                  {/* Decision badge */}
-                  <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12,padding:"10px 12px",background:`${dec.color}18`,border:`1px solid ${dec.color}40`,borderRadius:8}}>
-                    <div style={{width:10,height:10,borderRadius:"50%",background:dec.color,flexShrink:0}}/>
-                    <div>
-                      <div style={{fontSize:14,fontWeight:700,color:dec.color,letterSpacing:".05em"}}>{dec.label}</div>
-                      <div style={{fontSize:12,color:"#666",marginTop:2}}>{dec.msg}</div>
-                    </div>
-                  </div>
-                  {/* Edge interpretation */}
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12,fontSize:13}}>
-                    <span style={{color:"#555"}}>Interpretacja edge:</span>
-                    <span style={{color:el.color,fontWeight:600}}>{el.label}</span>
-                    {el.warn&&<span style={{fontSize:11,color:"#ff8c00"}}> · sprawdź dane</span>}
-                  </div>
-                  {el.warn&&<div style={{background:"rgba(255,140,0,.08)",border:"1px solid rgba(255,140,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#ff8c00"}}>⚠️ Nierealistycznie wysoka przewaga (&gt;20%) — sprawdź czy dane są poprawne. Profesjonalni gracze operują na 1–5%.</div>}
-                  {kelly.usingImplied&&<div style={{background:"rgba(90,159,255,.08)",border:"1px solid rgba(90,159,255,.2)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#5a9fff"}}>ℹ️ Użyto implied probability z kursu — za mało danych historycznych (min. 30 w segmencie)</div>}
-                  {!kelly.usingImplied&&kelly.smallSample&&<div style={{background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:A}}>⚠️ Mała próbka ({kelly.sampleN} kuponów) — wynik może być losowy. Potrzeba min. 30.</div>}
-                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
-                    {[{l:`Kelly (${kellyMode==="full"?"pełny":kellyMode==="half"?"½":"¼"})`,v:`${kelly.adjusted}% bankrolla`,c:A},{l:"Sugerowana stawka",v:`${kelly.stake} zł`,c:G},{l:"Twoja przewaga",v:`${kelly.edge}%`,c:+kelly.edge>0?G:R},{l:"Confidence",v:kelly.confidence==="alta"?"🟢 wysoka":kelly.confidence==="media"?"🟡 średnia":"🔴 niska",c:"#d4d8e8"}].map(({l,v,c})=>(
-                      <div key={l}><div style={{fontSize:11,color:"#444",marginBottom:3}}>{l}</div><div style={{fontSize:15,fontWeight:600,color:c}}>{v}</div></div>
-                    ))}
-                  </div>
-                  {kelly.capped&&<div style={{fontSize:12,color:A,marginBottom:4}}>⚠ Ucięto do 5% bankrolla ({(stats.bnow*0.05).toFixed(2)} zł max)</div>}
-                  {+kelly.edge<=0&&<div style={{fontSize:12,color:R}}>⚠️ Ujemna przewaga — matematycznie nie opłaca się grać.</div>}
-                </div>
-              );
-            })()}
+            {kelly&&<KellyResult kelly={kelly} kellyMode={kellyMode} stats={stats} A={A} G={G} R={R}/>}
           </div>
 
           {/* Tape calc */}
@@ -1272,9 +1350,9 @@ export default function App(){
                 style={{flex:1,minWidth:120,background:"rgba(220,50,50,.1)",border:"1px solid rgba(220,50,50,.3)",color:R,borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
                 📄 Eksport PDF
               </button>
-              <button className="tap" onClick={()=>jsonExport({coupons,bankroll,settings,withdrawals,templates})}
+              <button className="tap" onClick={doBackup}
                 style={{flex:1,minWidth:130,background:"rgba(0,200,80,.1)",border:"1px solid rgba(0,200,80,.3)",color:G,borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
-                💾 Backup JSON
+                💾 Backup JSON{lastBackup?<span style={{display:"block",fontSize:10,color:"#555",marginTop:2}}>{lastBackup}</span>:null}
               </button>
               <button className="tap" onClick={()=>csvExport(coupons,settings.taxRate||0)}
                 style={{flex:1,minWidth:130,background:"rgba(0,150,255,.1)",border:"1px solid rgba(0,150,255,.3)",color:B,borderRadius:8,padding:"12px",fontSize:14,fontWeight:600,cursor:"pointer"}}>
@@ -1288,6 +1366,8 @@ export default function App(){
             <input ref={importRef} type="file" accept=".json" style={{display:"none"}}
               onChange={e=>{if(e.target.files[0])jsonImport(e.target.files[0],{setCoupons,setBankroll,setSettings,setWithdrawals,setTemplates});e.target.value="";}}/>
             <div style={{fontSize:11,color:"#333",marginTop:10}}>💾 pełna kopia wszystkich danych · 📊 do Excela · 📥 wczytaj backup</div>
+            {lastBackup&&<div style={{fontSize:11,color:"#444",marginTop:6}}>Ostatni backup: <b style={{color:G}}>{lastBackup}</b>{(()=>{const d=Math.floor((Date.now()-new Date(lastBackup))/86400000);return d>0?<span style={{color:d>14?R:d>7?"#f0a500":"#555"}}> ({d} {d===1?"dzień":"dni"} temu)</span>:null;})()}</div>}
+            {!lastBackup&&coupons.length>0&&<div style={{fontSize:11,color:R,marginTop:6}}>⚠️ Nigdy nie zrobiłeś backupu — Twoje dane są zagrożone!</div>}
           </div>
         </>}
 
@@ -1770,7 +1850,8 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onCashout,onEdit
   const prob=c.probability!=null?c.probability/100:impliedProb(c.odds);
   const ev=calcEV(c.odds,prob);
   const edge=calcEdge(c.odds,prob);
-  const el=edgeLabel(edge);
+  const ec2=edge>20?"#ff8c00":edge>10?"#00c850":edge>=3?"#00c850":edge>=0?"#f0a500":"#dc3232";
+  const el2=edge>20?"⚠️ Nierealist.":edge>10?"Wysoka":edge>=3?"Umiark.":edge>=0?"Niska":"Brak";
 
   return(
     <div className={isPending?"pc":""} style={{background:sbg,border:`${isPending?"2px":"1px"} solid ${sbd}`,borderRadius:10,marginBottom:8,overflow:"hidden",width:"100%"}}>
@@ -1799,8 +1880,8 @@ function CouponCard({c,expanded,onToggle,onWon,onLost,onPending,onCashout,onEdit
         {/* EV details */}
         <div style={{padding:"8px 14px",borderTop:"1px solid rgba(0,0,0,.3)",display:"flex",gap:12,fontSize:12,color:"#444",flexWrap:"wrap",alignItems:"center"}}>
           <span>EV: <b style={{color:evColor(ev,A,G,"#dc3232")}}>{ev>=0?"+":""}{ev.toFixed(3)}</b></span>
-          <span>Edge: <b style={{color:el.color}}>{edge>=0?"+":""}{edge.toFixed(1)}%</b></span>
-          <span style={{color:el.color,fontWeight:600,fontSize:11}}>{el.label}</span>
+          <span>Edge: <b style={{color:ec2}}>{edge>=0?"+":""}{edge.toFixed(1)}%</b></span>
+          <span style={{color:ec2,fontWeight:600,fontSize:11}}>{el2}</span>
           <span style={{color:"#333",fontSize:11}}>Prob: {(prob*100).toFixed(2)}%{c.probability==null?" (implied)":""}</span>
         </div>
         {c.legs.length>0&&c.legs.map((l,i)=>(
