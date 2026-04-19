@@ -1,11 +1,37 @@
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, Component } from "react";
+
+// ─── Error Boundary ──────────────────────────────────────────────────────────
+class ErrorBoundary extends Component {
+  constructor(props){ super(props); this.state={hasError:false, err:null}; }
+  static getDerivedStateFromError(err){ return {hasError:true, err}; }
+  componentDidCatch(err, info){ try{ console.error("ErrorBoundary:", err, info); }catch{} }
+  reset = () => this.setState({hasError:false, err:null});
+  render(){
+    if(this.state.hasError){
+      return (
+        <div style={{fontFamily:"'DM Mono','Courier New',monospace",background:"#080b0f",minHeight:"100vh",color:"#d4d8e8",padding:"32px 20px"}}>
+          <div style={{maxWidth:500,margin:"40px auto",background:"#0d1117",border:"1px solid #3a1010",borderRadius:12,padding:"24px"}}>
+            <div style={{fontSize:18,color:"#dc3232",marginBottom:12,fontWeight:600}}>⚠️ Coś poszło nie tak</div>
+            <div style={{fontSize:13,color:"#7a8499",marginBottom:16,lineHeight:1.6}}>Aplikacja napotkała nieoczekiwany błąd. Twoje dane są bezpieczne w pamięci lokalnej.</div>
+            <div style={{fontSize:11,color:"#555",background:"#060810",padding:"10px",borderRadius:6,marginBottom:16,fontFamily:"monospace",overflow:"auto"}}>{String(this.state.err?.message||this.state.err||"Unknown error").slice(0,200)}</div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>{this.reset();}} style={{flex:1,background:"#f0a500",color:"#080b0f",border:"none",borderRadius:8,padding:"12px",fontSize:14,fontWeight:700,cursor:"pointer"}}>Spróbuj ponownie</button>
+              <button onClick={()=>{window.location.reload();}} style={{flex:1,background:"transparent",color:"#888",border:"1px solid #1a2030",borderRadius:8,padding:"12px",fontSize:14,cursor:"pointer"}}>Odśwież</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const BKM    = ["Superbet","Fortuna","STS","Betclic","LVBet","Betfan","Totolotek"];
 const MONTHS = ["Styczeń","Luty","Marzec","Kwiecień","Maj","Czerwiec","Lipiec","Sierpień","Wrzesień","Październik","Listopad","Grudzień"];
 const DAYS7  = ["Pn","Wt","Śr","Cz","Pt","Sb","Nd"];
 
-const SK="tc2",BK="tb2",SK2="ts2",SK3="tw2",SK4="tt2",SAL="tal2",SKB="tbk2";
+const SK="tc2",BK="tb2",SK2="ts2",SK3="tw2",SK4="tt2",SAL="tal2",SKB="tbk2",SKO="tonb2";
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 const todayISO = () => {
@@ -14,9 +40,24 @@ const todayISO = () => {
 };
 const fmt   = (n) => `${n>=0?"+":""}${n.toFixed(2)} zł`;
 const fmtP  = (n) => `${n>=0?"+":""}${n.toFixed(1)}%`;
-const ls    = {
-  get:(k,fb)=>{ try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb;}catch{return fb;} },
-  set:(k,v)=>{ try{localStorage.setItem(k,JSON.stringify(v));}catch{} },
+const ls = {
+  get: (k, fb=null) => {
+    try { const v = localStorage.getItem(k); return v !== null ? JSON.parse(v) : fb; }
+    catch { return fb; }
+  },
+  set: (k, v) => {
+    try {
+      localStorage.setItem(k, JSON.stringify(v));
+      return true;
+    } catch(e) {
+      if (e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014)) {
+        try { alert('Pamięć pełna. Wyeksportuj dane (Ustawienia → Eksport) i usuń stare kupony.'); } catch {}
+      } else {
+        try { console.error('Storage error:', e); } catch {}
+      }
+      return false;
+    }
+  },
 };
 // Unit display helper
 const toU = (stake, unitSize) => unitSize>0 ? `${(stake/unitSize).toFixed(1)}u` : null;
@@ -39,12 +80,27 @@ const calcPnl = (c, taxRate=0) => {
     return gross>0?gross*(1-tax):gross;
   }
   if(c.status==="won"){
+    // Polish tax: 10% only on amount ABOVE 2280 PLN threshold (per stake, per coupon)
+    const applyPLTax = (gross, totalReturn) => {
+      if(tax===0 || gross<=0) return gross;
+      if(taxRate===10){ // Polish rule
+        const taxable = Math.max(0, totalReturn - 2280);
+        const taxAmount = taxable * 0.10;
+        return gross - taxAmount;
+      }
+      // Generic flat tax (for other rates)
+      return gross*(1-tax);
+    };
     if(c.isFreebet){
-      const gross=c.freebetSR?c.odds*c.stake-c.stake:(c.odds-1)*c.stake;
-      return gross>0?gross*(1-tax):gross;
+      // SR (Stake Returned): profit = odds × stake (full return incl. stake equivalent)
+      // Non-SR: profit = (odds-1) × stake (only winnings, no stake back)
+      const gross=c.freebetSR?c.odds*c.stake:(c.odds-1)*c.stake;
+      const totalReturn=c.freebetSR?c.odds*c.stake:(c.odds-1)*c.stake;
+      return applyPLTax(gross, totalReturn);
     }
     const gross=c.odds*c.stake-c.stake;
-    return gross>0?gross*(1-tax):gross;
+    const totalReturn=c.odds*c.stake; // brutto wygrana z kuponu
+    return applyPLTax(gross, totalReturn);
   }
   if(c.status==="lost") return c.isFreebet?0:-c.stake;
   return 0;
@@ -74,7 +130,7 @@ const calcDecision = (opts) => {
   if(lossStreak>=20)      return {level:"stop",   label:"STOP BETTING",     color:"#dc3232", msg:"Seria 20+ przegranych. Zatrzymaj się całkowicie."};
   if(ev<0)                return {level:"no",     label:"NIE GRAJ",         color:"#dc3232", msg:"Ujemne EV — matematycznie opłaca się nie grać."};
   if(lossStreak>=10)      return {level:"caution",label:"OSTROŻNIE",        color:"#f0a500", msg:`Seria ${lossStreak} przegranych. Zmniejsz stawkę o 50%.`};
-  if(segN<30&&usingImplied) return {level:"caution",label:"OSTROŻNIE",     color:"#f0a500", msg:"Za mało danych historycznych — decyzja niepewna."};
+  if(segN<5&&usingImplied) return {level:"caution",label:"OSTROŻNIE",     color:"#f0a500", msg:"Za mało danych historycznych — decyzja niepewna."};
   if(edge<1&&edge>=0)     return {level:"caution",label:"NISKA PRZEWAGA",   color:"#f0a500", msg:"Edge poniżej 1% — niemal brak matematycznej przewagi."};
   if(lossStreak>=5)       return {level:"caution",label:"OSTROŻNIE",        color:"#f0a500", msg:`Seria ${lossStreak} przegranych. Rozważ zmniejszenie stawki.`};
   if(kellyPct>5)          return {level:"caution",label:"WYSOKA STAWKA",    color:"#f0a500", msg:"Kelly sugeruje więcej niż 5% bankrolla — cap aktywny."};
@@ -93,6 +149,8 @@ const rollingAvg = (pts, window=7) => pts.map((_, i) => {
 });
 
 // ─── Export / Import ─────────────────────────────────────────────────────────
+const escapeHtml = (s) => String(s==null?"":s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 const pdfExport = (coupons, stats, settings, bankroll) => {
   const taxRate=settings.taxRate||0;
   const cur="zł";
@@ -134,8 +192,8 @@ const pdfExport = (coupons, stats, settings, bankroll) => {
   <h2>Ostatnie kupony</h2>
   <table><thead><tr><th>Data</th><th>Buk</th><th>Kurs</th><th>Stawka</th><th>Status</th><th>P&L</th></tr></thead>
   <tbody>${[...coupons].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,50).map(c=>`
-    <tr><td>${c.date}</td><td>${c.bk}</td><td>×${c.odds.toFixed(2)}</td><td>${c.stake} ${cur}</td>
-    <td>${c.status}</td><td style="color:${calcPnl(c,taxRate)>=0?"#00a844":"#cc2222"}">${calcPnl(c,taxRate)>=0?"+":""}${calcPnl(c,taxRate).toFixed(2)} ${cur}</td></tr>`).join("")}</tbody></table>
+    <tr><td>${escapeHtml(c.date)}</td><td>${escapeHtml(c.bk)}</td><td>×${c.odds.toFixed(2)}</td><td>${c.stake} ${cur}</td>
+    <td>${escapeHtml(c.status)}</td><td style="color:${calcPnl(c,taxRate)>=0?"#00a844":"#cc2222"}">${calcPnl(c,taxRate)>=0?"+":""}${calcPnl(c,taxRate).toFixed(2)} ${cur}</td></tr>`).join("")}</tbody></table>
   <script>window.print()</script></body></html>`;
   const w=window.open("","_blank");w.document.write(html);w.document.close();
 };
@@ -155,19 +213,37 @@ const csvExport = (cs,taxRate=0) => {
   const blob=new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"});
   const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="tasma.csv";a.click();
 };
-const jsonImport = (file,callbacks) => {
+const jsonImport = (file,callbacks,existingCoupons=[],existingWd=[],existingTpl=[]) => {
   const reader=new FileReader();
   reader.onload=(e)=>{
     try{
       const data=JSON.parse(e.target.result);
       if(!data.coupons||!Array.isArray(data.coupons)){alert("Nieprawidłowy plik backup.");return;}
-      if(window.confirm(`Importować ${data.coupons.length} kuponów? Aktualne dane zostaną zastąpione.`)){
+      const existIds=new Set(existingCoupons.map(c=>c.id));
+      const fresh=data.coupons.filter(c=>!existIds.has(c.id));
+      const dupes=data.coupons.length-fresh.length;
+      if(existingCoupons.length===0){
         callbacks.setCoupons(data.coupons);
         if(data.bankroll!==undefined)callbacks.setBankroll(data.bankroll);
         if(data.settings)callbacks.setSettings(s=>({...s,...data.settings}));
         if(data.withdrawals)callbacks.setWithdrawals(data.withdrawals);
         if(data.templates)callbacks.setTemplates(data.templates);
         alert(`✓ Zaimportowano ${data.coupons.length} kuponów`);
+      } else {
+        const merged=[...existingCoupons,...fresh].sort((a,b)=>a.date.localeCompare(b.date));
+        callbacks.setCoupons(merged);
+        if(data.withdrawals){
+          const wdIds=new Set(existingWd.map(w=>w.id));
+          const newWd=data.withdrawals.filter(w=>!wdIds.has(w.id));
+          if(newWd.length>0)callbacks.setWithdrawals(prev=>[...prev,...newWd]);
+        }
+        if(data.templates){
+          const tplIds=new Set(existingTpl.map(t=>t.id));
+          const newTpl=data.templates.filter(t=>!tplIds.has(t.id));
+          if(newTpl.length>0)callbacks.setTemplates(prev=>[...prev,...newTpl]);
+        }
+        alert(`✓ Dodano ${fresh.length} nowych kuponów${dupes>0?` (pominięto ${dupes} duplikatów)`:""}.
+Razem w bazie: ${merged.length}`);
       }
     }catch{alert("Błąd odczytu pliku.");}
   };
@@ -176,43 +252,19 @@ const jsonImport = (file,callbacks) => {
 
 // ─── Seed data ────────────────────────────────────────────────────────────────
 const SEED=[
-  {id:1, date:"2026-03-23",bk:"Superbet",stake:15,odds:81.78,  legs:[],status:"lost",note:"Taśma #21 · 19 zd.",isFreebet:false,probability:null},
-  {id:2, date:"2026-03-22",bk:"Superbet",stake:15,odds:122.24, legs:[],status:"lost",note:"Taśma #20 · 16 zd.",isFreebet:false,probability:null},
-  {id:3, date:"2026-03-22",bk:"Superbet",stake:15,odds:124.17, legs:[],status:"lost",note:"Taśma #19 · 20 zd.",isFreebet:false,probability:null},
-  {id:4, date:"2026-03-22",bk:"Superbet",stake:15,odds:91.28,  legs:[],status:"lost",note:"Taśma #18 · 18 zd.",isFreebet:false,probability:null},
-  {id:5, date:"2026-03-21",bk:"Superbet",stake:15,odds:71.63,  legs:[],status:"lost",note:"Taśma #17 · 16 zd.",isFreebet:false,probability:null},
-  {id:6, date:"2026-03-21",bk:"STS",     stake:15,odds:125.89, legs:[],status:"lost",note:"Taśma #16 · 21 zd.",isFreebet:false,probability:null},
-  {id:7, date:"2026-03-19",bk:"Superbet",stake:15,odds:54.26,  legs:[],status:"lost",note:"Taśma #15 · 13 zd.",isFreebet:false,probability:null},
-  {id:8, date:"2026-03-18",bk:"Superbet",stake:15,odds:93.28,  legs:[],status:"lost",note:"Taśma #14 · 25 zd.",isFreebet:false,probability:null},
-  {id:9, date:"2026-03-18",bk:"Superbet",stake:15,odds:21.59,  legs:[],status:"lost",note:"Taśma #13 · 23 zd.",isFreebet:false,probability:null},
-  {id:10,date:"2026-03-17",bk:"Superbet",stake:2, odds:278460, legs:[],status:"lost",note:"Taśma #12 · 5 zd.", isFreebet:false,probability:null},
-  {id:11,date:"2026-03-17",bk:"Superbet",stake:15,odds:55.00,  legs:[],status:"won", note:"Taśma #11 · 28 zd.",isFreebet:false,probability:null},
-  {id:12,date:"2026-03-17",bk:"Superbet",stake:5, odds:2003.59,legs:[],status:"lost",note:"Taśma #10 · 32 zd.",isFreebet:false,probability:null},
-  {id:13,date:"2026-03-16",bk:"Superbet",stake:15,odds:586.76, legs:[],status:"lost",note:"Taśma #9 · 26 zd.", isFreebet:false,probability:null},
-  {id:14,date:"2026-03-15",bk:"Superbet",stake:15,odds:84.81,  legs:[],status:"lost",note:"Taśma #8 · 15 zd.", isFreebet:false,probability:null},
-  {id:15,date:"2026-03-15",bk:"Superbet",stake:15,odds:84.48,  legs:[],status:"lost",note:"Taśma #7 · 17 zd.", isFreebet:false,probability:null},
-  {id:16,date:"2026-03-14",bk:"Superbet",stake:15,odds:143.00, legs:[],status:"lost",note:"Taśma #6 · 19 zd.", isFreebet:false,probability:null},
-  {id:17,date:"2026-03-13",bk:"Superbet",stake:15,odds:165.00, legs:[],status:"lost",note:"Taśma #5 · 19 zd.", isFreebet:false,probability:null},
-  {id:18,date:"2026-03-13",bk:"Superbet",stake:15,odds:154.70, legs:[],status:"lost",note:"Taśma #4 · 22 zd.", isFreebet:false,probability:null},
-  {id:19,date:"2026-03-11",bk:"Superbet",stake:15,odds:112.35, legs:[],status:"lost",note:"Taśma #3 · 19 zd.", isFreebet:false,probability:null},
-  {id:20,date:"2026-03-12",bk:"Superbet",stake:15,odds:132.33, legs:[],status:"lost",note:"Taśma #2 · 21 zd.", isFreebet:false,probability:null},
-  {id:21,date:"2026-03-06",bk:"Superbet",stake:15,odds:372.56, legs:[],status:"lost",note:"Taśma #1 · 24 zd.", isFreebet:false,probability:null},
-];
-
-// ─── Achievements ─────────────────────────────────────────────────────────────
-const ACH=[
-  {id:"first", icon:"🏆",name:"Pierwsza wygrana",    desc:"Wygrałeś pierwszy kupon",           check:s=>s.won>=1},
-  {id:"win3",  icon:"🔥",name:"Seria 3 wygranych",    desc:"3 wygrane z rzędu",                 check:s=>s.maxWS>=3},
-  {id:"win5",  icon:"💥",name:"Seria 5 wygranych",    desc:"5 wygranych z rzędu",               check:s=>s.maxWS>=5},
-  {id:"c10",   icon:"📋",name:"10 kuponów",           desc:"Łącznie 10 kuponów",                check:s=>s.total>=10},
-  {id:"c50",   icon:"📚",name:"50 kuponów",           desc:"Łącznie 50 kuponów",                check:s=>s.total>=50},
-  {id:"p500",  icon:"💰",name:"Zysk 500 zł",         desc:"Łączny zysk przekroczył 500 zł",    check:s=>s.totalPnl>=500},
-  {id:"bigwin",icon:"🦈",name:"Duża ryba",           desc:"Jednorazowa wygrana ponad 500 zł",   check:s=>s.maxWin>=500},
-  {id:"sur10", icon:"🧊",name:"Przetrwałem",         desc:"Przeżyłeś serię 10 przegranych",     check:s=>s.maxLS>=10},
-  {id:"sur20", icon:"⛰️",name:"Twardziel",           desc:"Przeżyłeś serię 20 przegranych",     check:s=>s.maxLS>=20},
-  {id:"goal",  icon:"🎯",name:"Cel osiągnięty",      desc:"Bankroll osiągnął cel",              check:(s,st)=>s.bnow>=st.goalBankroll},
-  {id:"value", icon:"📐",name:"Value bettor",        desc:"Znalazłeś 5 kuponów z EV > 0",      check:s=>s.valueCount>=5},
-  {id:"odds1k",icon:"🚀",name:"Łowca kursów",        desc:"Kupon z kursem powyżej 1000",        check:s=>s.maxOdds>=1000},
+  {id:1, date:"2026-04-14",bk:"Superbet",stake:20, odds:42.15,legs:[],status:"won", note:"Taśma demo · 15 zd.",isFreebet:false,probability:null},
+  {id:2, date:"2026-04-13",bk:"Superbet",stake:15, odds:85.40,legs:[],status:"lost",note:"Taśma demo · 18 zd.",isFreebet:false,probability:null},
+  {id:3, date:"2026-04-12",bk:"Fortuna", stake:15, odds:62.30,legs:[],status:"lost",note:"Taśma demo · 16 zd.",isFreebet:false,probability:null},
+  {id:4, date:"2026-04-11",bk:"Superbet",stake:20, odds:28.75,legs:[],status:"won", note:"Taśma demo · 12 zd.",isFreebet:false,probability:null},
+  {id:5, date:"2026-04-10",bk:"STS",     stake:15, odds:110.50,legs:[],status:"lost",note:"Taśma demo · 19 zd.",isFreebet:false,probability:null},
+  {id:6, date:"2026-04-09",bk:"Superbet",stake:15, odds:95.80,legs:[],status:"lost",note:"Taśma demo · 17 zd.",isFreebet:false,probability:null},
+  {id:7, date:"2026-04-08",bk:"Superbet",stake:15, odds:56.20,legs:[],status:"lost",note:"Taśma demo · 14 zd.",isFreebet:false,probability:null},
+  {id:8, date:"2026-04-07",bk:"Fortuna", stake:15, odds:72.10,legs:[],status:"lost",note:"Taśma demo · 16 zd.",isFreebet:false,probability:null},
+  {id:9, date:"2026-04-06",bk:"Superbet",stake:20, odds:35.60,legs:[],status:"won", note:"Taśma demo · 13 zd.",isFreebet:false,probability:null},
+  {id:10,date:"2026-04-05",bk:"Superbet",stake:15, odds:128.90,legs:[],status:"lost",note:"Taśma demo · 20 zd.",isFreebet:false,probability:null},
+  {id:11,date:"2026-04-04",bk:"STS",     stake:15, odds:64.50,legs:[],status:"lost",note:"Taśma demo · 15 zd.",isFreebet:false,probability:null},
+  {id:12,date:"2026-04-03",bk:"Superbet",stake:15, odds:88.25,legs:[],status:"lost",note:"Taśma demo · 18 zd.",isFreebet:false,probability:null},
+  {id:13,date:"2026-04-02",bk:"Superbet",stake:15, odds:105.00,legs:[],status:"lost",note:"Taśma demo · 19 zd.",isFreebet:false,probability:null},
 ];
 
 // ─── Breakdown grouping ───────────────────────────────────────────────────────
@@ -245,7 +297,7 @@ function KellyResult({kelly,kellyMode,stats,A,G,R}){
   if(ls>=20)                        {lbl="STOP BETTING";  clr="#dc3232";msg="Seria 20+ przegranych. Zatrzymaj się całkowicie.";}
   else if(ev<0)                     {lbl="NIE GRAJ";      clr="#dc3232";msg="Ujemne EV — matematycznie opłaca się nie grać.";}
   else if(ls>=10)                   {lbl="OSTROŻNIE";     clr="#f0a500";msg=`Seria ${ls} przegranych. Zmniejsz stawkę o 50%.`;}
-  else if(kelly.sampleN<30&&kelly.usingImplied){lbl="OSTROŻNIE";clr="#f0a500";msg="Za mało danych — użyto implied probability.";}
+  else if(kelly.sampleN<5&&kelly.usingImplied){lbl="OSTROŻNIE";clr="#f0a500";msg="Za mało danych — użyto implied probability.";}
   else if(edge<1&&edge>=0)          {lbl="NISKA PRZEWAGA";clr="#f0a500";msg="Edge <1% — niemal brak matematycznej przewagi.";}
   else if(ls>=5)                    {lbl="OSTROŻNIE";     clr="#f0a500";msg=`Seria ${ls} przegranych. Rozważ zmniejszenie stawki.`;}
   else if(ev>0&&edge>=3)            {lbl="OK TO BET";     clr="#00c850";msg="Pozytywne EV i wystarczająca przewaga.";}
@@ -267,8 +319,8 @@ function KellyResult({kelly,kellyMode,stats,A,G,R}){
         {edge>20&&<span style={{fontSize:11,color:"#ff8c00"}}> · sprawdź dane</span>}
       </div>
       {edge>20&&<div style={{background:"rgba(255,140,0,.08)",border:"1px solid rgba(255,140,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#ff8c00"}}>⚠️ Edge &gt;20% jest nierealistycznie wysoki. Profesjonaliści operują na 1–5%.</div>}
-      {kelly.usingImplied&&<div style={{background:"rgba(90,159,255,.08)",border:"1px solid rgba(90,159,255,.2)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#5a9fff"}}>ℹ️ Użyto implied probability — za mało danych historycznych (min. 30 w segmencie)</div>}
-      {!kelly.usingImplied&&kelly.smallSample&&<div style={{background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:A}}>⚠️ Mała próbka ({kelly.sampleN} kuponów) — potrzeba min. 30.</div>}
+      {kelly.usingImplied&&<div style={{background:"rgba(90,159,255,.08)",border:"1px solid rgba(90,159,255,.2)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:"#5a9fff"}}>ℹ️ Użyto implied probability — za mało danych historycznych (min. 5 w segmencie)</div>}
+      {!kelly.usingImplied&&kelly.smallSample&&<div style={{background:"rgba(240,165,0,.1)",border:"1px solid rgba(240,165,0,.3)",borderRadius:6,padding:"7px 10px",marginBottom:10,fontSize:11,color:A}}>⚠️ Mała próbka ({kelly.sampleN} kuponów) — potrzeba min. 5.</div>}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
         {[
           {l:`Kelly (${kellyMode==="full"?"pełny":kellyMode==="half"?"½":"¼"})`,v:`${kelly.adjusted}% bankrolla`,c:A},
@@ -286,7 +338,11 @@ function KellyResult({kelly,kellyMode,stats,A,G,R}){
   );
 }
 
-export default function App(){
+export default function AppRoot(){
+  return <ErrorBoundary><App /></ErrorBoundary>;
+}
+
+function App(){
   const [coupons,     setCoupons]     = useState(()=>ls.get(SK,SEED));
   const [bankroll,    setBankroll]    = useState(()=>ls.get(BK,500));
   const [settings,    setSettings]    = useState(()=>ls.get(SK2,{goalBankroll:2000,dayLoss:50,weekLoss:150,taxRate:0,alertsEnabled:true,stopAfter:20,unitSize:0,dayProfitGoal:0}));
@@ -311,6 +367,11 @@ export default function App(){
   const [wdForm,     setWdForm]     = useState({date:todayISO(),amount:"",note:""});
   const [showTpl,    setShowTpl]    = useState(false);
   const [lastBackup, setLastBackup]  = useState(()=>ls.get(SKB,null));
+  const [onbDone,    setOnbDone]    = useState(()=>ls.get(SKO,false));
+  const [onbStep,    setOnbStep]    = useState(0);
+  const [onbBR,      setOnbBR]      = useState(500);
+  const [onbStake,   setOnbStake]   = useState(15);
+  const [onbHasHistory, setOnbHasHistory] = useState(null); // null|"0"|"1-10"|"10+"
   const [tplForm,    setTplForm]    = useState({name:"",bk:"Superbet",stake:"15",odds:""});
   // Search & filter
   const [histSearch, setHistSearch] = useState("");
@@ -377,11 +438,30 @@ export default function App(){
   const openEdit = (c)=>{setForm({...c,stake:String(c.stake),odds:String(c.odds),probability:c.probability!=null?String(c.probability):""});setEditId(c.id);setShowAdd(true);};
   const saveForm = ()=>{
     if(!form.odds||!form.stake)return;
-    const obj={...form,stake:+form.stake,odds:+form.odds,probability:form.probability!==""&&form.probability!=null?+form.probability:null};
+    const stakeNum = +form.stake;
+    const oddsNum = +form.odds;
+    // Validation
+    if(!isFinite(stakeNum) || stakeNum <= 0 || stakeNum > 1000000){
+      alert("Nieprawidłowa stawka (musi być liczbą od 0.01 do 1 000 000)");
+      return;
+    }
+    if(!isFinite(oddsNum) || oddsNum < 1.01 || oddsNum > 1000000){
+      alert("Nieprawidłowy kurs (musi być liczbą od 1.01 do 1 000 000)");
+      return;
+    }
+    if(!form.date || !/^\d{4}-\d{2}-\d{2}$/.test(form.date)){
+      alert("Nieprawidłowa data");
+      return;
+    }
+    // Trim note to max 280 chars
+    const cleanNote = (form.note||"").toString().slice(0, 280);
+    const probNum = form.probability!==""&&form.probability!=null ? +form.probability : null;
+    const cleanProb = (probNum!=null && isFinite(probNum) && probNum>=0 && probNum<=100) ? probNum : null;
+    const obj={...form,note:cleanNote,stake:stakeNum,odds:oddsNum,probability:cleanProb};
     if(editId){
       const prev=coupons.find(x=>x.id===editId);
       const prevOdds=prev?.odds;
-      const newOdds=+form.odds;
+      const newOdds=oddsNum;
       let hist=[...(prev?.oddsHistory||[])];
       if(prevOdds&&prevOdds!==newOdds) hist=[...hist,{date:todayISO(),odds:prevOdds}];
       setCoupons(p=>p.map(x=>x.id===editId?{...obj,id:editId,oddsHistory:hist}:x));
@@ -413,12 +493,22 @@ export default function App(){
     const bnow=bankroll+totalPnl;
     const totalW=withdrawals.reduce((s,w)=>s+w.amount,0);
 
-    // Streaks
+    // Streaks (cashout with loss counts as lost; cashout with profit counts as won)
     let cW=0,cL=0,maxWS=0,maxLS=0,maxAD=0,cAD=0,prevD=null;
     const sorted=[...coupons].sort((a,b)=>a.date.localeCompare(b.date));
+    const coStatus=(c)=>{
+      if(c.status==="won")return "won";
+      if(c.status==="lost")return "lost";
+      if(c.status==="cashout"){
+        const gross=(c.cashoutAmount||0)-(c.isFreebet?0:c.stake);
+        return gross>=0?"won":"lost";
+      }
+      return null;
+    };
     sorted.forEach(c=>{
-      if(c.status==="won"){cW++;cL=0;maxWS=Math.max(maxWS,cW);}
-      else if(c.status==="lost"){cL++;cW=0;maxLS=Math.max(maxLS,cL);}
+      const s=coStatus(c);
+      if(s==="won"){cW++;cL=0;maxWS=Math.max(maxWS,cW);}
+      else if(s==="lost"){cL++;cW=0;maxLS=Math.max(maxLS,cL);}
       if(prevD){const diff=(new Date(c.date)-new Date(prevD))/86400000;if(diff===1){cAD++;maxAD=Math.max(maxAD,cAD+1);}else cAD=0;}
       prevD=c.date;
     });
@@ -427,8 +517,10 @@ export default function App(){
     let streak=0;
     for(const c of [...coupons].sort((a,b)=>b.date.localeCompare(a.date))){
       if(c.status==="pending")continue;
-      if(!streak){streak=c.status==="won"?1:-1;continue;}
-      if((streak>0&&c.status==="won")||(streak<0&&c.status==="lost"))streak+=streak>0?1:-1;else break;
+      const s=coStatus(c);
+      if(!s)continue;
+      if(!streak){streak=s==="won"?1:-1;continue;}
+      if((streak>0&&s==="won")||(streak<0&&s==="lost"))streak+=streak>0?1:-1;else break;
     }
 
     // Streak history for chart
@@ -525,8 +617,8 @@ export default function App(){
     const fAdj=Math.min(Math.max(0,f)*multiplier,0.05); // cap 5% bankroll
     const capped=fAdj>=0.05;
     const confidence=segData.n>=50?"alta":segData.n>=20?"media":"niskie";
-    const smallSample=segData.n<30;
-    const usingImplied=!kWinP&&segData.n<30;
+    const smallSample=segData.n<5;
+    const usingImplied=!kWinP&&segData.n<5;
     return{full:Math.max(0,f*100).toFixed(1),adjusted:(fAdj*100).toFixed(2),stake:(fAdj*stats.bnow).toFixed(2),
       edge:((wp*o-1)*100).toFixed(1),capped,confidence,smallSample,usingImplied,sampleN:segData.n,
       wr:(wp*100).toFixed(1),mode:kellyMode};
@@ -684,8 +776,6 @@ export default function App(){
     );
   };
 
-  const earned=useMemo(()=>ACH.filter(a=>a.check(stats,settings)).map(a=>a.id),[stats,settings]);
-
   return(
     <div style={{fontFamily:"'DM Mono','Courier New',monospace",background:"#080b0f",minHeight:"100vh",color:"#d4d8e8",width:"100%",overflowX:"hidden"}}>
       <style>{`
@@ -705,6 +795,117 @@ export default function App(){
         .modal{background:#0d1117;border:1px solid #1a2030;border-radius:16px 16px 0 0;width:100%;max-width:680px;max-height:90vh;overflow-y:auto;padding:20px 16px;}
       `}</style>
 
+      {/* ── ONBOARDING OVERLAY ── */}
+      {!onbDone&&(
+        <div style={{position:"fixed",inset:0,background:"#080b0f",zIndex:500,display:"flex",flexDirection:"column",padding:"24px 20px",overflowY:"auto"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:32}}>
+            <span style={{fontSize:18,fontWeight:500,letterSpacing:".1em",color:A}}>TAŚMA·TRACKER</span>
+            <div style={{display:"flex",gap:6}}>
+              {[0,1,2].map(i=><div key={i} style={{width:28,height:3,borderRadius:2,background:i<=onbStep?A:"#1a2030"}}/>)}
+            </div>
+          </div>
+
+          {onbStep===0&&(
+            <div style={{flex:1,display:"flex",flexDirection:"column",maxWidth:500,margin:"0 auto",width:"100%"}}>
+              <div style={{fontSize:32,fontWeight:700,color:"#d4d8e8",marginBottom:12,letterSpacing:"-.02em"}}>Cześć 👋</div>
+              <div style={{fontSize:17,color:"#7a8499",marginBottom:32,lineHeight:1.5}}>Taśma Tracker pomoże Ci kontrolować zakłady akumulatorowe i grać z głową, nie z emocjami.</div>
+
+              <div style={{fontSize:13,color:"#555",letterSpacing:".1em",marginBottom:12}}>ILE MASZ HISTORII?</div>
+              <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:32}}>
+                {[["0","Dopiero zaczynam"],["1-10","Mam 1-10 kuponów"],["10+","Mam już sporo historii"]].map(([k,l])=>(
+                  <button key={k} className="tap" onClick={()=>setOnbHasHistory(k)}
+                    style={{background:onbHasHistory===k?"rgba(240,165,0,.12)":"#0d1117",border:`1px solid ${onbHasHistory===k?A:"#1a2030"}`,borderRadius:10,padding:"16px 18px",textAlign:"left",color:onbHasHistory===k?A:"#d4d8e8",fontSize:15,fontWeight:500,cursor:"pointer"}}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{marginTop:"auto",display:"flex",gap:10}}>
+                <button className="tap" onClick={()=>{ls.set(SKO,true);setOnbDone(true);}}
+                  style={{background:"transparent",border:"1px solid #1a2030",color:"#555",borderRadius:10,padding:"14px 20px",fontSize:14,cursor:"pointer"}}>
+                  Pomiń
+                </button>
+                <button className="tap" disabled={!onbHasHistory} onClick={()=>setOnbStep(1)}
+                  style={{background:onbHasHistory?A:"#1a2030",color:onbHasHistory?"#080b0f":"#555",border:"none",borderRadius:10,padding:"14px 20px",fontSize:15,fontWeight:700,cursor:onbHasHistory?"pointer":"not-allowed",flex:1}}>
+                  Dalej →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onbStep===1&&(
+            <div style={{flex:1,display:"flex",flexDirection:"column",maxWidth:500,margin:"0 auto",width:"100%"}}>
+              <div style={{fontSize:28,fontWeight:700,color:"#d4d8e8",marginBottom:12,letterSpacing:"-.02em"}}>Ustawmy bankroll 💰</div>
+              <div style={{fontSize:15,color:"#7a8499",marginBottom:28,lineHeight:1.5}}>Bankroll to kwota przeznaczona wyłącznie na zakłady. Kelly będzie sugerował stawki w jej oparciu.</div>
+
+              <div style={{fontSize:13,color:"#555",letterSpacing:".1em",marginBottom:10}}>AKTUALNY BANKROLL (zł)</div>
+              <input type="number" value={onbBR} onChange={e=>setOnbBR(+e.target.value||0)}
+                style={{background:"#0d1117",border:`1px solid #1a2030`,borderRadius:10,padding:"16px 18px",color:A,fontSize:22,fontWeight:600,fontFamily:"inherit",width:"100%",marginBottom:18}}/>
+
+              <div style={{fontSize:13,color:"#555",letterSpacing:".1em",marginBottom:10}}>TYPOWA STAWKA (zł)</div>
+              <input type="number" value={onbStake} onChange={e=>setOnbStake(+e.target.value||0)}
+                style={{background:"#0d1117",border:`1px solid #1a2030`,borderRadius:10,padding:"16px 18px",color:A,fontSize:22,fontWeight:600,fontFamily:"inherit",width:"100%",marginBottom:18}}/>
+
+              <div style={{background:"rgba(0,200,80,.06)",border:"1px solid rgba(0,200,80,.2)",borderRadius:8,padding:"12px 14px",marginBottom:24}}>
+                <div style={{fontSize:12,color:G,marginBottom:4}}>💡 WSKAZÓWKA</div>
+                <div style={{fontSize:13,color:"#888",lineHeight:1.5}}>Typowa stawka to {onbBR>0?((onbStake/onbBR)*100).toFixed(1):"0"}% bankrolla. Profesjonaliści trzymają to w okolicach 1-2%.</div>
+              </div>
+
+              <div style={{marginTop:"auto",display:"flex",gap:10}}>
+                <button className="tap" onClick={()=>setOnbStep(0)}
+                  style={{background:"transparent",border:"1px solid #1a2030",color:"#888",borderRadius:10,padding:"14px 20px",fontSize:14,cursor:"pointer"}}>
+                  ← Wstecz
+                </button>
+                <button className="tap" onClick={()=>setOnbStep(2)}
+                  style={{background:A,color:"#080b0f",border:"none",borderRadius:10,padding:"14px 20px",fontSize:15,fontWeight:700,cursor:"pointer",flex:1}}>
+                  Dalej →
+                </button>
+              </div>
+            </div>
+          )}
+
+          {onbStep===2&&(
+            <div style={{flex:1,display:"flex",flexDirection:"column",maxWidth:500,margin:"0 auto",width:"100%"}}>
+              <div style={{fontSize:28,fontWeight:700,color:"#d4d8e8",marginBottom:12,letterSpacing:"-.02em"}}>Gotowe 🎯</div>
+              <div style={{fontSize:15,color:"#7a8499",marginBottom:24,lineHeight:1.5}}>{onbHasHistory==="0"?"Wgraliśmy 13 demo kuponów żebyś zobaczył jak działają statystyki. Możesz je usunąć w każdej chwili.":"Możesz teraz:"}</div>
+
+              <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:28}}>
+                <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px"}}>
+                  <div style={{fontSize:13,color:A,marginBottom:4,fontWeight:600}}>⚡ DODAWAJ KUPONY</div>
+                  <div style={{fontSize:13,color:"#888"}}>Przycisk "+ KUPON" w prawym górnym rogu. Data, stawka, kurs — gotowe.</div>
+                </div>
+                <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px"}}>
+                  <div style={{fontSize:13,color:G,marginBottom:4,fontWeight:600}}>📐 DECISION ENGINE</div>
+                  <div style={{fontSize:13,color:"#888"}}>Już od 5 kuponów zobaczysz sygnały: OK TO BET · OSTROŻNIE · STOP. Zakładka ANALIZA.</div>
+                </div>
+                <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"14px 16px"}}>
+                  <div style={{fontSize:13,color:"#5a9fff",marginBottom:4,fontWeight:600}}>📥 IMPORT HISTORII</div>
+                  <div style={{fontSize:13,color:"#888"}}>Masz już dane? Ustawienia → Import JSON. Załadujesz całą historię.</div>
+                </div>
+              </div>
+
+              <div style={{marginTop:"auto",display:"flex",gap:10}}>
+                <button className="tap" onClick={()=>setOnbStep(1)}
+                  style={{background:"transparent",border:"1px solid #1a2030",color:"#888",borderRadius:10,padding:"14px 20px",fontSize:14,cursor:"pointer"}}>
+                  ← Wstecz
+                </button>
+                <button className="tap" onClick={()=>{
+                  // Apply settings
+                  if(onbBR>0){setBankroll(onbBR);}
+                  // If user has history 1-10 or 10+, clear seed data
+                  if(onbHasHistory!=="0"){setCoupons([]);}
+                  ls.set(SKO,true);
+                  setOnbDone(true);
+                }}
+                  style={{background:G,color:"#080b0f",border:"none",borderRadius:10,padding:"14px 20px",fontSize:15,fontWeight:700,cursor:"pointer",flex:1}}>
+                  Zaczynamy! 🚀
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* HEADER */}
       <div style={{background:"#0a0d14",borderBottom:"1px solid #1a2030",position:"sticky",top:0,zIndex:99,width:"100%"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 16px 8px"}}>
@@ -715,10 +916,10 @@ export default function App(){
           </button>
         </div>
         <div style={{display:"flex",overflowX:"auto"}}>
-          {[["today","DZIŚ"],["cal","KALENDARZ"],["stats","STATSY"],["analysis","ANALIZA"],["ach","OSIĄG."],["cfg","⚙"]].map(([v,l])=>(
+          {[["today","DZIŚ"],["cal","KALENDARZ"],["stats","STATSY"],["analysis","ANALIZA"],["cfg","⚙"]].map(([v,l])=>(
             <button key={v} className="tap" onClick={()=>setView(v)}
               style={{flexShrink:0,background:"none",border:"none",borderBottom:view===v?`2px solid ${A}`:"2px solid transparent",color:view===v?A:"#555",padding:"10px 14px",fontSize:13,fontWeight:600,cursor:"pointer",transition:"all .15s",whiteSpace:"nowrap"}}>
-              {l}{v==="ach"&&earned.length>0&&<span style={{background:A,color:"#080b0f",borderRadius:10,padding:"1px 6px",fontSize:10,marginLeft:4,fontWeight:700}}>{earned.length}</span>}
+              {l}
             </button>
           ))}
         </div>
@@ -984,7 +1185,17 @@ export default function App(){
             DZIŚ · {todayList.length} kuponów
             {todayList.filter(c=>c.status==="pending").length>0&&<span style={{color:A}}> · {todayList.filter(c=>c.status==="pending").length} oczekuje</span>}
           </div>
-          {todayList.length===0&&<div style={{textAlign:"center",color:"#333",padding:"32px 0",fontSize:16}}>Brak kuponu na dziś.<br/><span style={{color:A,cursor:"pointer"}} onClick={openAdd}>+ KUPON</span></div>}
+          {todayList.length===0&&(
+            <div style={{background:"#0d1117",border:"1px dashed #1a2030",borderRadius:12,padding:"36px 20px",textAlign:"center",marginBottom:16}}>
+              <div style={{fontSize:38,marginBottom:10,opacity:.3}}>📋</div>
+              <div style={{fontSize:15,color:"#7a8499",marginBottom:6,fontWeight:500}}>Brak kuponów na dziś</div>
+              <div style={{fontSize:13,color:"#444",marginBottom:18,maxWidth:280,margin:"0 auto 18px"}}>Dodaj pierwszy kupon, żeby zacząć śledzić wyniki i analizę Kelly.</div>
+              <button className="tap" onClick={openAdd}
+                style={{background:A,color:"#080b0f",border:"none",borderRadius:10,padding:"12px 24px",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+                + DODAJ PIERWSZY KUPON
+              </button>
+            </div>
+          )}
           <Cards cs={todayList}/>
           {/* Search & Filter bar */}
           <div style={{marginBottom:10}}>
@@ -1038,7 +1249,11 @@ export default function App(){
             )}
           </div>
           {Object.keys(histGrp).length===0&&(histSearch||filterBk||filterEV||filterSt)&&(
-            <div style={{textAlign:"center",color:"#333",padding:"24px",fontSize:14}}>Brak wyników dla tych filtrów</div>
+            <div style={{background:"#0d1117",border:"1px dashed #1a2030",borderRadius:10,padding:"24px",textAlign:"center"}}>
+              <div style={{fontSize:28,marginBottom:8,opacity:.3}}>🔍</div>
+              <div style={{fontSize:14,color:"#7a8499",marginBottom:4}}>Brak wyników dla tych filtrów</div>
+              <div style={{fontSize:12,color:"#444"}}>Spróbuj zmienić kryteria wyszukiwania</div>
+            </div>
           )}
           {Object.entries(histGrp).map(([date,cs])=><DayGroup key={date} date={date} cs={cs}/>)}
         </>}
@@ -1305,9 +1520,9 @@ export default function App(){
                 ))}
               </div>
             </div>
-            {stats.segWR[kSegment]?.n<30&&(
+            {stats.segWR[kSegment]?.n<5&&(
               <div style={{background:"rgba(240,165,0,.08)",border:"1px solid rgba(240,165,0,.2)",borderRadius:7,padding:"8px 12px",marginBottom:10,fontSize:12,color:A}}>
-                ⚠️ Mała próbka ({stats.segWR[kSegment]?.n} kuponów) — wynik może być losowy. Potrzeba min. 30. Użyto implied probability z kursu.
+                ⚠️ Mała próbka ({stats.segWR[kSegment]?.n} kuponów) — wynik może być losowy. Potrzeba min. 5. Użyto implied probability z kursu.
               </div>
             )}
             <div style={{display:"flex",gap:10,marginBottom:12,flexWrap:"wrap"}}>
@@ -1364,7 +1579,7 @@ export default function App(){
               </button>
             </div>
             <input ref={importRef} type="file" accept=".json" style={{display:"none"}}
-              onChange={e=>{if(e.target.files[0])jsonImport(e.target.files[0],{setCoupons,setBankroll,setSettings,setWithdrawals,setTemplates});e.target.value="";}}/>
+              onChange={e=>{if(e.target.files[0])jsonImport(e.target.files[0],{setCoupons,setBankroll,setSettings,setWithdrawals,setTemplates},coupons,withdrawals,templates);e.target.value="";}}/>
             <div style={{fontSize:11,color:"#333",marginTop:10}}>💾 pełna kopia wszystkich danych · 📊 do Excela · 📥 wczytaj backup</div>
             {lastBackup&&<div style={{fontSize:11,color:"#444",marginTop:6}}>Ostatni backup: <b style={{color:G}}>{lastBackup}</b>{(()=>{const d=Math.floor((Date.now()-new Date(lastBackup))/86400000);return d>0?<span style={{color:d>14?R:d>7?"#f0a500":"#555"}}> ({d} {d===1?"dzień":"dni"} temu)</span>:null;})()}</div>}
             {!lastBackup&&coupons.length>0&&<div style={{fontSize:11,color:R,marginTop:6}}>⚠️ Nigdy nie zrobiłeś backupu — Twoje dane są zagrożone!</div>}
@@ -1388,7 +1603,13 @@ export default function App(){
                 </button>
               </div>
             </div>
-            {breakdown.groups.length===0&&<div style={{fontSize:14,color:"#333"}}>Brak rozliczonych kuponów.</div>}
+            {breakdown.groups.length===0&&(
+              <div style={{background:"#060810",border:"1px dashed #1a2030",borderRadius:10,padding:"24px",textAlign:"center"}}>
+                <div style={{fontSize:28,marginBottom:8,opacity:.3}}>📊</div>
+                <div style={{fontSize:13,color:"#7a8499"}}>Brak rozliczonych kuponów.</div>
+                <div style={{fontSize:12,color:"#444",marginTop:4}}>Rozlicz kilka kuponów żeby zobaczyć analizę.</div>
+              </div>
+            )}
             {breakdown.groups.map((g,i)=>{
               const isWorst=g===breakdown.worst;
               const isBest=g===breakdown.best;
@@ -1438,7 +1659,7 @@ export default function App(){
           {/* Legs */}
           <div style={{background:"#0d1117",border:"1px solid #1a2030",borderRadius:10,padding:"16px"}}>
             <div style={{fontSize:14,color:"#444",marginBottom:12}}>📊 DŁUGOŚĆ TAŚMY</div>
-            {Object.entries(stats.legsBuckets).length===0&&<div style={{fontSize:14,color:"#333"}}>Brak danych.</div>}
+            {Object.entries(stats.legsBuckets).length===0&&<div style={{fontSize:13,color:"#555",textAlign:"center",padding:"16px"}}>Dodaj kilka kuponów żeby zobaczyć statystyki długości taśmy.</div>}
             {Object.entries(stats.legsBuckets).sort((a,b)=>a[0].localeCompare(b[0])).map(([b,d])=>{
               const wr=d.t>0?(d.w/d.t)*100:0;
               return(
@@ -1523,24 +1744,6 @@ export default function App(){
                 </div>
               </>
             )}
-          </div>
-        </>}
-
-        {/* ── OSIĄGNIĘCIA ── */}
-        {view==="ach"&&<>
-          <div style={{fontSize:14,color:"#444",marginBottom:4}}>OSIĄGNIĘCIA · {earned.length}/{ACH.length}</div>
-          <div style={{background:"#060810",borderRadius:6,height:8,overflow:"hidden",marginBottom:16}}>
-            <div style={{width:`${(earned.length/ACH.length)*100}%`,height:"100%",background:A,borderRadius:6,transition:"width .5s"}}/>
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-            {ACH.map(a=>{const done=earned.includes(a.id);return(
-              <div key={a.id} className={done?"":"ach-off"} style={{background:done?"rgba(240,165,0,.07)":"#0d1117",border:`1px solid ${done?"rgba(240,165,0,.3)":"#1a2030"}`,borderRadius:10,padding:"14px"}}>
-                <div style={{fontSize:26,marginBottom:6}}>{a.icon}</div>
-                <div style={{fontSize:14,fontWeight:600,color:done?A:"#555",marginBottom:3}}>{a.name}</div>
-                <div style={{fontSize:12,color:"#333"}}>{a.desc}</div>
-                {done&&<div style={{fontSize:11,color:G,marginTop:6}}>✓ Odblokowane</div>}
-              </div>
-            );})}
           </div>
         </>}
 
@@ -1688,7 +1891,7 @@ export default function App(){
                 <button className="tap" onClick={saveTpl} style={{background:A,color:"#080b0f",border:"none",borderRadius:7,padding:"9px 18px",fontSize:14,fontWeight:700,cursor:"pointer"}}>ZAPISZ</button>
               </div>
             )}
-            {templates.length===0&&<div style={{fontSize:13,color:"#333"}}>Brak szablonów.</div>}
+            {templates.length===0&&<div style={{fontSize:12,color:"#555"}}>Brak szablonów. Dodaj kupon i zapisz go jako szablon żeby szybko powielać podobne.</div>}
             {templates.map(t=>(
               <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:"1px solid #0f1520",flexWrap:"wrap"}}>
                 <span>⭐</span>
